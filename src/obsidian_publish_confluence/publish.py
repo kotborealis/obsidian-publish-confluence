@@ -74,8 +74,20 @@ def curl(config: Config, args: list[str], data: str | None = None) -> str:
         "Content-Type: application/json",
         *args,
     ]
+    if data is not None:
+        cmd.extend(["--data-binary", "@-"])
     completed = subprocess.run(cmd, input=data, text=True, capture_output=True, check=True)
     return completed.stdout
+
+
+def parse_json_response(response_text: str) -> dict[str, object]:
+    if not response_text.strip():
+        die("Confluence API returned an empty response")
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        snippet = response_text[:500].strip()
+        die(f"Confluence API returned non-JSON response: {snippet or '<empty>'}")
 
 
 def curl_status(url: str) -> str:
@@ -101,15 +113,15 @@ def check_prereqs(config: Config) -> None:
 
 
 def confluence_get(config: Config, path: str) -> dict[str, object]:
-    return json.loads(curl(config, [f"{config.api_url}{path}"]))
+    return parse_json_response(curl(config, [f"{config.api_url}{path}"]))
 
 
 def confluence_post(config: Config, path: str, payload: dict[str, object]) -> dict[str, object]:
-    return json.loads(curl(config, ["-X", "POST", f"{config.api_url}{path}"], data=json.dumps(payload)))
+    return parse_json_response(curl(config, ["-X", "POST", f"{config.api_url}{path}"], data=json.dumps(payload)))
 
 
 def confluence_put(config: Config, path: str, payload: dict[str, object]) -> dict[str, object]:
-    return json.loads(curl(config, ["-X", "PUT", f"{config.api_url}{path}"], data=json.dumps(payload)))
+    return parse_json_response(curl(config, ["-X", "PUT", f"{config.api_url}{path}"], data=json.dumps(payload)))
 
 
 def fetch_page_version(config: Config, page_id: str) -> int:
