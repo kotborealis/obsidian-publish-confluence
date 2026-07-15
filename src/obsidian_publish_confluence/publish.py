@@ -30,12 +30,32 @@ class MappingEntry(TypedDict):
     updated_at: str
 
 
+class ConfluenceApiError(RuntimeError):
+    pass
+
+
 def die(message: str) -> None:
     raise RuntimeError(message)
 
 
 def info(message: str) -> None:
     print(f"  {message}", file=sys.stderr)
+
+
+def summarize_confluence_error(response: JsonDict) -> str:
+    parts: list[str] = []
+    status_code = response.get("statusCode")
+    if status_code is not None:
+        parts.append(f"HTTP {status_code}")
+    message = response.get("message")
+    if isinstance(message, str) and message:
+        parts.append(message)
+    reason = response.get("reason")
+    if isinstance(reason, str) and reason:
+        parts.append(f"reason={reason}")
+    if not parts:
+        return "Confluence API request failed"
+    return "; ".join(parts)
 
 
 @dataclass
@@ -98,10 +118,13 @@ def parse_json_response(response_text: str) -> JsonDict:
     if not response_text.strip():
         die("Confluence API returned an empty response")
     try:
-        return cast(JsonDict, json.loads(response_text))
+        parsed = cast(JsonDict, json.loads(response_text))
     except json.JSONDecodeError:
         snippet = response_text[:500].strip()
         die(f"Confluence API returned non-JSON response: {snippet or '<empty>'}")
+    if "statusCode" in parsed and parsed.get("statusCode") != 200:
+        raise ConfluenceApiError(summarize_confluence_error(parsed))
+    return parsed
     raise AssertionError("unreachable")
 
 
@@ -151,9 +174,12 @@ def confluence_delete(config: Config, path: str) -> JsonDict | None:
 
 
 def fetch_page_version(config: Config, page_id: str) -> int:
-    response = confluence_get(config, f"/content/{page_id}?expand=version")
-    if response.get("statusCode") == 404:
-        die(f"Mapped page ID {page_id} no longer exists in Confluence")
+    try:
+        response = confluence_get(config, f"/content/{page_id}?expand=version")
+    except ConfluenceApiError as exc:
+        if "HTTP 404" in str(exc):
+            die(f"Mapped page ID {page_id} no longer exists in Confluence")
+        raise
     version = response.get("version")
     if not isinstance(version, dict) or "number" not in version:
         die(f"Confluence API response for page {page_id} does not include version info")
@@ -193,6 +219,8 @@ def create_page(config: Config, title: str, body: str, parent_id: str, space_key
             "body": {"storage": {"value": body, "representation": "storage"}},
         },
     )
+    if "id" not in response:
+        raise ConfluenceApiError(summarize_confluence_error(response))
     return str(response["id"])
 
 
@@ -208,6 +236,8 @@ def update_page(config: Config, page_id: str, title: str, body: str, prev_versio
             "body": {"storage": {"value": body, "representation": "storage"}},
         },
     )
+    if "version" not in response:
+        raise ConfluenceApiError(summarize_confluence_error(response))
     return int(response["version"]["number"])
 
 
@@ -343,6 +373,7 @@ def publish_markdown(
     space_key: str | None = None,
     parent_id: str | None = None,
     base_url: str | None = None,
+    dry_run: bool = False,
 ) -> str:
     config = Config(
         base_url=base_url or config.base_url,
@@ -351,7 +382,8 @@ def publish_markdown(
         mapping_file=config.mapping_file,
     )
     config.require_publish_config()
-    check_prereqs(config)
+    if not dry_run:
+        check_prereqs(config)
 
     abs_md = str(Path(md_file).resolve())
     resolved_title = title or Path(md_file).stem
@@ -365,6 +397,17 @@ def publish_markdown(
     attachments = convert_result["attachments"]
     if not html_body:
         die("Conversion produced empty body")
+
+    if dry_run:
+        page_id = lookup_page_id(config.mapping_file, abs_md)
+        action = "update" if page_id else "create"
+        info(f"Dry run:     {action}")
+        info(f"Attachments: {len(attachments)}")
+        for attachment in attachments:
+            info(f"  - {attachment['name']}")
+        plantuml_count = html_body.count('ac:name="plantuml"')
+        info(f"PlantUML:    {plantuml_count} macro(s)")
+        return "DRY-RUN"
 
     page_id = lookup_page_id(config.mapping_file, abs_md)
     if page_id:

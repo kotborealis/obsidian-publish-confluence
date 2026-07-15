@@ -17,6 +17,7 @@ Versioning is derived from Git tags for releases.
 - Convert Obsidian image embeds like `![[image.png]]` and `![[image.png|400]]`.
 - Convert fenced code blocks to Confluence code macros.
 - Convert PlantUML blocks to the native Confluence `plantuml` macro.
+- Support `--dry-run` to inspect conversion and publish actions without changing Confluence.
 
 ## Requirements
 
@@ -60,8 +61,11 @@ export OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID="123456"
 obsidian-publish-confluence note.md
 obsidian-publish-confluence note.md --title "Custom title"
 obsidian-publish-confluence note.md --space DEV --parent-id 987654
+obsidian-publish-confluence note.md --dry-run
 obsidian-publish-confluence --check
 ```
+
+`--dry-run` converts the note, prints the intended action and attachment list, and skips Confluence API calls.
 
 ## Kerberos
 
@@ -85,6 +89,8 @@ For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release
 ## Limitations
 
 - Only image-style Obsidian embeds are converted to Confluence attachments.
+- Attachment names are namespaced automatically to avoid collisions between files with the same basename.
+- Numeric Obsidian image suffixes like `![[image.png|640]]` become Confluence image widths.
 - Non-image wiki links stay plain text.
 - PDF embeds are not converted.
 - Auth mode is Kerberos-only.

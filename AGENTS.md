@@ -34,12 +34,16 @@ Main entrypoints:
 - If there is no mapping entry, the tool creates a new page instead of matching by title.
 - Attachments must be uploaded on both create and update.
 - For `curl` POST/PUT requests, JSON payload must be sent with `--data-binary @-`.
+- API errors should surface Confluence HTTP status and message instead of generic key errors.
+- `--dry-run` must not call Confluence or require Kerberos.
 
 ## Obsidian behavior
 
 - Image embeds like `![[image.png]]` and `![[image.png|400]]` are converted to Confluence attachments.
+- Numeric Obsidian image suffixes are mapped to Confluence image widths.
 - Non-image wiki links stay as text.
 - `plantuml` / `puml` fenced blocks are converted directly to the native Confluence `plantuml` macro.
+- Attachment names are automatically namespaced as `opc-<hash>-<basename>` to avoid collisions.
 
 ## Environment variables
 

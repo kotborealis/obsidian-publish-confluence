@@ -17,6 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-id", help="Parent page ID")
     parser.add_argument("--base-url", help="Confluence base URL")
     parser.add_argument("--check", action="store_true", help="Show mapping status")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Convert and show actions without publishing"
+    )
     return parser
 
 
@@ -38,13 +41,17 @@ def main() -> int:
             space_key=args.space,
             parent_id=args.parent_id,
             base_url=args.base_url,
+            dry_run=args.dry_run,
         )
     except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print()
-    print(f"Done: {page_url}")
+    if args.dry_run:
+        print("Done: dry run")
+    else:
+        print(f"Done: {page_url}")
     return 0
 
 

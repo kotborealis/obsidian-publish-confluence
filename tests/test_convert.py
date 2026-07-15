@@ -17,10 +17,11 @@ class ConvertTests(unittest.TestCase):
 
             result: ConvertResult = collect_attachments(str(note), None)
 
-            self.assertIn('ri:attachment ri:filename="image.png"', result["body"])
-            self.assertEqual(
-                [attachment["name"] for attachment in result["attachments"]], ["image.png"]
-            )
+            attachment_names = [attachment["name"] for attachment in result["attachments"]]
+            self.assertEqual(len(attachment_names), 1)
+            self.assertIn('ri:attachment ri:filename="', result["body"])
+            self.assertIn(attachment_names[0], result["body"])
+            self.assertTrue(attachment_names[0].endswith("-image.png"))
 
     def test_non_image_wikilink_stays_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -48,6 +49,36 @@ class ConvertTests(unittest.TestCase):
             )
             self.assertIn("@startuml\nAlice -> Bob: ping\n@enduml", result["body"])
             self.assertEqual(result["attachments"], [])
+
+    def test_image_width_is_preserved_in_confluence_markup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            image = Path(tmp) / "image.png"
+            note.write_text("![[image.png|640]]\n", encoding="utf-8")
+            image.write_bytes(b"png")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertIn('ac:width="640"', result["body"])
+
+    def test_same_basename_from_different_paths_gets_different_attachment_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            a_dir = Path(tmp) / "a"
+            b_dir = Path(tmp) / "b"
+            a_dir.mkdir()
+            b_dir.mkdir()
+            (a_dir / "logo.png").write_bytes(b"a")
+            (b_dir / "logo.png").write_bytes(b"b")
+            note.write_text("![[a/logo.png]]\n![[b/logo.png]]\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            attachment_names = [attachment["name"] for attachment in result["attachments"]]
+            self.assertEqual(len(attachment_names), 2)
+            self.assertNotEqual(attachment_names[0], attachment_names[1])
+            for name in attachment_names:
+                self.assertIn(name, result["body"])
 
 
 if __name__ == "__main__":
