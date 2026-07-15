@@ -5,10 +5,21 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import TypedDict
 
 import markdown
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+
+class AttachmentJson(TypedDict):
+    name: str
+    data_b64: str
+
+
+class ConvertResult(TypedDict):
+    body: str
+    attachments: list[AttachmentJson]
 
 
 def find_vault_root(start_dir: str) -> Path:
@@ -74,7 +85,8 @@ def extract_plantuml_macros(text: str) -> tuple[str, dict[str, str]]:
         macro_id = uuid.uuid4()
         token = f"PLANTUMLMACRO{len(replacements)}TOKEN"
         replacements[token] = (
-            f'<ac:structured-macro ac:name="plantuml" ac:schema-version="1" ac:macro-id="{macro_id}">'
+            f'<ac:structured-macro ac:name="plantuml" '
+            f'ac:schema-version="1" ac:macro-id="{macro_id}">'
             '<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>'
             f"<ac:plain-text-body><![CDATA[{code}\n]]></ac:plain-text-body>"
             "</ac:structured-macro>"
@@ -118,7 +130,9 @@ def fix_xhtml(html: str) -> str:
     return html
 
 
-def collect_local_image_attachments(html: str, base_dir: str, vault_root: Path) -> list[tuple[str, bytes]]:
+def collect_local_image_attachments(
+    html: str, base_dir: str, vault_root: Path
+) -> list[tuple[str, bytes]]:
     attachments: list[tuple[str, bytes]] = []
 
     def collect(match: re.Match[str]) -> str:
@@ -160,7 +174,7 @@ def render_markdown(text: str) -> str:
     )
 
 
-def collect_attachments(md_path: str, plantuml_server: str | None = None) -> dict[str, object]:
+def collect_attachments(md_path: str, plantuml_server: str | None = None) -> ConvertResult:
     md_path = os.path.abspath(md_path)
     if not os.path.isfile(md_path):
         raise FileNotFoundError(f"File not found: {md_path}")
@@ -180,7 +194,7 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> dic
     image_attachments = collect_local_image_attachments(html, base_dir, vault_root)
     html = convert_local_images_to_ac(html, base_dir, vault_root)
 
-    attachments = [
+    attachments: list[AttachmentJson] = [
         {"name": name, "data_b64": base64.b64encode(data).decode("ascii")}
         for name, data in image_attachments
     ]

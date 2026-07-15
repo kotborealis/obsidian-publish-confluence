@@ -10,11 +10,24 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
-from .convert import collect_attachments
+from .convert import AttachmentJson, ConvertResult, collect_attachments
 
 ENV_PREFIX = "OBSIDIAN_PUBLISH_CONFLUENCE"
 DEFAULT_MAPPING_FILE = os.path.expanduser("~/.config/obsidian-publish-confluence/mapping.json")
+
+JsonDict = dict[str, Any]
+
+
+class MappingEntry(TypedDict):
+    page_id: str
+    title: str
+    parent_id: str
+    space_key: str
+    url: str
+    version: int
+    updated_at: str
 
 
 def die(message: str) -> None:
@@ -36,7 +49,9 @@ class Config:
     def api_url(self) -> str:
         if not self.base_url:
             die(f"Set {ENV_PREFIX}_BASE_URL or pass --base-url")
-        return f"{self.base_url.rstrip('/')}/rest/api"
+        base_url = self.base_url
+        assert base_url is not None
+        return f"{base_url.rstrip('/')}/rest/api"
 
     def require_publish_config(self) -> None:
         if not self.base_url:
@@ -79,14 +94,15 @@ def curl(config: Config, args: list[str], data: str | None = None) -> str:
     return completed.stdout
 
 
-def parse_json_response(response_text: str) -> dict[str, object]:
+def parse_json_response(response_text: str) -> JsonDict:
     if not response_text.strip():
         die("Confluence API returned an empty response")
     try:
-        return json.loads(response_text)
-    except json.JSONDecodeError as exc:
+        return cast(JsonDict, json.loads(response_text))
+    except json.JSONDecodeError:
         snippet = response_text[:500].strip()
         die(f"Confluence API returned non-JSON response: {snippet or '<empty>'}")
+    raise AssertionError("unreachable")
 
 
 def curl_status(url: str) -> str:
@@ -111,19 +127,23 @@ def check_prereqs(config: Config) -> None:
         die(f"Cannot authenticate to Confluence (HTTP {code}). Check Kerberos ticket and config.")
 
 
-def confluence_get(config: Config, path: str) -> dict[str, object]:
+def confluence_get(config: Config, path: str) -> JsonDict:
     return parse_json_response(curl(config, [f"{config.api_url}{path}"]))
 
 
-def confluence_post(config: Config, path: str, payload: dict[str, object]) -> dict[str, object]:
-    return parse_json_response(curl(config, ["-X", "POST", f"{config.api_url}{path}"], data=json.dumps(payload)))
+def confluence_post(config: Config, path: str, payload: JsonDict) -> JsonDict:
+    return parse_json_response(
+        curl(config, ["-X", "POST", f"{config.api_url}{path}"], data=json.dumps(payload))
+    )
 
 
-def confluence_put(config: Config, path: str, payload: dict[str, object]) -> dict[str, object]:
-    return parse_json_response(curl(config, ["-X", "PUT", f"{config.api_url}{path}"], data=json.dumps(payload)))
+def confluence_put(config: Config, path: str, payload: JsonDict) -> JsonDict:
+    return parse_json_response(
+        curl(config, ["-X", "PUT", f"{config.api_url}{path}"], data=json.dumps(payload))
+    )
 
 
-def confluence_delete(config: Config, path: str) -> dict[str, object] | None:
+def confluence_delete(config: Config, path: str) -> JsonDict | None:
     response_text = curl(config, ["-X", "DELETE", f"{config.api_url}{path}"])
     if not response_text.strip():
         return None
@@ -134,17 +154,22 @@ def fetch_page_version(config: Config, page_id: str) -> int:
     response = confluence_get(config, f"/content/{page_id}?expand=version")
     if response.get("statusCode") == 404:
         die(f"Mapped page ID {page_id} no longer exists in Confluence")
-    if "version" not in response or "number" not in response["version"]:
+    version = response.get("version")
+    if not isinstance(version, dict) or "number" not in version:
         die(f"Confluence API response for page {page_id} does not include version info")
-    return int(response["version"]["number"])
+    version_dict = cast(JsonDict, version)
+    return int(version_dict["number"])
 
 
 def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str | None:
     encoded_name = urllib.parse.quote(name)
-    response = confluence_get(config, f"/content/{page_id}/child/attachment?filename={encoded_name}")
+    response = confluence_get(
+        config, f"/content/{page_id}/child/attachment?filename={encoded_name}"
+    )
     results = response.get("results", [])
     if results:
-        return str(results[0]["id"])
+        first = cast(JsonDict, results[0])
+        return str(first["id"])
     return None
 
 
@@ -186,7 +211,7 @@ def update_page(config: Config, page_id: str, title: str, body: str, prev_versio
     return int(response["version"]["number"])
 
 
-def upload_attachments(config: Config, page_id: str, attachments: list[dict[str, str]]) -> None:
+def upload_attachments(config: Config, page_id: str, attachments: list[AttachmentJson]) -> None:
     if not attachments:
         return
 
@@ -255,16 +280,16 @@ def upload_attachments(config: Config, page_id: str, attachments: list[dict[str,
             info(f"Uploaded: {name}")
 
 
-def load_mapping(mapping_file: str) -> dict[str, dict[str, object]]:
+def load_mapping(mapping_file: str) -> dict[str, MappingEntry]:
     path = Path(mapping_file)
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast(dict[str, MappingEntry], json.loads(path.read_text(encoding="utf-8")))
 
 
 def lookup_page_id(mapping_file: str, md_path: str) -> str | None:
-    entry = load_mapping(mapping_file).get(md_path, {})
-    page_id = entry.get("page_id")
+    entry = load_mapping(mapping_file).get(md_path)
+    page_id = entry.get("page_id") if entry else None
     return str(page_id) if page_id else None
 
 
@@ -335,9 +360,9 @@ def publish_markdown(
     info(f"Parent ID:   {config.parent_id}")
     info("Converting markdown...")
 
-    convert_result = collect_attachments(abs_md)
-    html_body = str(convert_result["body"])
-    attachments = list(convert_result["attachments"])
+    convert_result: ConvertResult = collect_attachments(abs_md)
+    html_body = convert_result["body"]
+    attachments = convert_result["attachments"]
     if not html_body:
         die("Conversion produced empty body")
 
@@ -364,10 +389,14 @@ def publish_markdown(
                 config.space or "",
                 new_version,
             )
-            return f"{config.base_url.rstrip('/')}/spaces/{config.space}/pages/{page_id}"
+            base_url = config.base_url or ""
+            space = config.space or ""
+            return f"{base_url.rstrip('/')}/spaces/{space}/pages/{page_id}"
     if not page_id:
         info(f"Creating new page under parent {config.parent_id}...")
-        page_id = create_page(config, resolved_title, html_body, config.parent_id or "", config.space or "")
+        page_id = create_page(
+            config, resolved_title, html_body, config.parent_id or "", config.space or ""
+        )
         info(f"Created page ID: {page_id}")
         upload_attachments(config, page_id, attachments)
         save_mapping_entry(
@@ -381,4 +410,6 @@ def publish_markdown(
             1,
         )
 
-    return f"{config.base_url.rstrip('/')}/spaces/{config.space}/pages/{page_id}"
+    base_url = config.base_url or ""
+    space = config.space or ""
+    return f"{base_url.rstrip('/')}/spaces/{space}/pages/{page_id}"

@@ -8,7 +8,9 @@ from .publish import cmd_check, config_from_env, publish_markdown
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Publish Obsidian Markdown to Confluence over Kerberos")
+    parser = argparse.ArgumentParser(
+        description="Publish Obsidian Markdown to Confluence over Kerberos"
+    )
     parser.add_argument("file", nargs="?", help="Path to markdown file")
     parser.add_argument("--title", help="Page title")
     parser.add_argument("--space", help="Confluence space key")

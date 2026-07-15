@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from obsidian_publish_confluence.convert import collect_attachments
+from obsidian_publish_confluence.convert import ConvertResult, collect_attachments
 
 
 class ConvertTests(unittest.TestCase):
@@ -15,17 +15,19 @@ class ConvertTests(unittest.TestCase):
             note.write_text("![[image.png]]\n", encoding="utf-8")
             image.write_bytes(b"png")
 
-            result = collect_attachments(str(note), None)
+            result: ConvertResult = collect_attachments(str(note), None)
 
             self.assertIn('ri:attachment ri:filename="image.png"', result["body"])
-            self.assertEqual([attachment["name"] for attachment in result["attachments"]], ["image.png"])
+            self.assertEqual(
+                [attachment["name"] for attachment in result["attachments"]], ["image.png"]
+            )
 
     def test_non_image_wikilink_stays_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
             note.write_text("![[some-note]]\n", encoding="utf-8")
 
-            result = collect_attachments(str(note), None)
+            result: ConvertResult = collect_attachments(str(note), None)
 
             self.assertIn("![[some-note]]", result["body"])
             self.assertEqual(result["attachments"], [])
@@ -33,13 +35,18 @@ class ConvertTests(unittest.TestCase):
     def test_plantuml_block_becomes_confluence_macro_without_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
-            note.write_text("```plantuml\n@startuml\nAlice -> Bob: ping\n@enduml\n```\n", encoding="utf-8")
+            note.write_text(
+                "```plantuml\n@startuml\nAlice -> Bob: ping\n@enduml\n```\n",
+                encoding="utf-8",
+            )
 
-            result = collect_attachments(str(note), None)
+            result: ConvertResult = collect_attachments(str(note), None)
 
             self.assertIn('ac:name="plantuml"', result["body"])
-            self.assertIn('ac:name="atlassian-macro-output-type">INLINE</ac:parameter>', result["body"])
-            self.assertIn('@startuml\nAlice -> Bob: ping\n@enduml', result["body"])
+            self.assertIn(
+                'ac:name="atlassian-macro-output-type">INLINE</ac:parameter>', result["body"]
+            )
+            self.assertIn("@startuml\nAlice -> Bob: ping\n@enduml", result["body"])
             self.assertEqual(result["attachments"], [])
 
 

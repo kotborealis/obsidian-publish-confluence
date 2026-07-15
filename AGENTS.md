@@ -16,6 +16,9 @@ Main entrypoints:
 - Install locally with `pipx install --force .` or `python -m pip install -e .`.
 - Build with `python -m build`.
 - Run tests with `PYTHONPATH=src python -m unittest discover -s tests`.
+- Run lint with `ruff check .`.
+- Run format check with `ruff format --check .`.
+- Run type checks with `ty check --python .venv` or `ty check --python <your-venv>`.
 
 ## Release flow
 
