@@ -64,22 +64,32 @@ def convert_obsidian_image_embeds(text: str) -> str:
     return re.sub(r"!\[\[([^\]]+)\]\]", replace, text)
 
 
-def convert_plantuml_blocks(text: str) -> str:
+def extract_plantuml_macros(text: str) -> tuple[str, dict[str, str]]:
+    replacements: dict[str, str] = {}
 
     def replace(match: re.Match[str]) -> str:
         code = match.group(2).strip()
         if not code:
             return ""
         macro_id = uuid.uuid4()
-        return (
+        token = f"PLANTUMLMACRO{len(replacements)}TOKEN"
+        replacements[token] = (
             f'<ac:structured-macro ac:name="plantuml" ac:schema-version="1" ac:macro-id="{macro_id}">'
             '<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>'
             f"<ac:plain-text-body><![CDATA[{code}\n]]></ac:plain-text-body>"
             "</ac:structured-macro>"
         )
+        return f"\n\n{token}\n\n"
 
     pattern = re.compile(r"```(plantuml|puml)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-    return pattern.sub(replace, text)
+    return pattern.sub(replace, text), replacements
+
+
+def restore_plantuml_macros(html: str, replacements: dict[str, str]) -> str:
+    for token, macro in replacements.items():
+        html = html.replace(f"<p>{token}</p>", macro)
+        html = html.replace(token, macro)
+    return html
 
 
 def escape_xml(text: str) -> str:
@@ -160,10 +170,11 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> dic
     text = Path(md_path).read_text(encoding="utf-8")
     text = convert_obsidian_image_embeds(text)
 
-    text = convert_plantuml_blocks(text)
+    text, plantuml_replacements = extract_plantuml_macros(text)
 
     html = render_markdown(text)
     html = fix_xhtml(html)
+    html = restore_plantuml_macros(html, plantuml_replacements)
     html = convert_code_blocks(html)
 
     image_attachments = collect_local_image_attachments(html, base_dir, vault_root)
