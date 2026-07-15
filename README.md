@@ -1,7 +1,7 @@
 # obsidian-publish-confluence
 
 [![PyPI](https://img.shields.io/pypi/v/obsidian-publish-confluence)](https://pypi.org/project/obsidian-publish-confluence/)
-[![Python](https://img.shields.io/pypi/pyversions/obsidian-publish-confluence)](https://pypi.org/project/obsidian-publish-confluence/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue.svg)](https://pypi.org/project/obsidian-publish-confluence/)
 [![Build](https://github.com/kotborealis/obsidian-publish-confluence/actions/workflows/build.yml/badge.svg)](https://github.com/kotborealis/obsidian-publish-confluence/actions/workflows/build.yml)
 [![License: WTFPL](https://img.shields.io/badge/license-WTFPL-brightgreen.svg)](LICENSE)
 
