@@ -11,8 +11,7 @@ Versioning is derived from Git tags for releases.
 - Upload attachments on both page create and update.
 - Convert Obsidian image embeds like `![[image.png]]` and `![[image.png|400]]`.
 - Convert fenced code blocks to Confluence code macros.
-- Convert PlantUML blocks to attachments when a PlantUML server is configured.
-- Leave `plantuml` / `puml` blocks as normal code blocks when no PlantUML server is configured.
+- Convert PlantUML blocks to the native Confluence `plantuml` macro.
 
 ## Requirements
 
@@ -41,12 +40,10 @@ Set these environment variables:
 - `OBSIDIAN_PUBLISH_CONFLUENCE_SPACE`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE` (optional)
-- `OBSIDIAN_PUBLISH_CONFLUENCE_PLANTUML_SERVER` (optional)
 
 Defaults:
 
 - `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE` defaults to `~/.config/obsidian-publish-confluence/mapping.json`
-- `OBSIDIAN_PUBLISH_CONFLUENCE_PLANTUML_SERVER` is disabled unless set
 
 ## Usage
 
@@ -71,13 +68,9 @@ kinit YOUR_LOGIN@REALM.EXAMPLE
 
 ## PlantUML
 
-To enable PlantUML rendering, set:
+PlantUML fenced blocks are converted to the native Confluence `plantuml` macro.
 
-```bash
-export OBSIDIAN_PUBLISH_CONFLUENCE_PLANTUML_SERVER="http://localhost:9090"
-```
-
-Without this variable, PlantUML blocks stay regular code blocks.
+This requires a Confluence instance with a compatible `plantuml` macro installed.
 
 ## Release versioning
 
@@ -91,6 +84,7 @@ For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release
 - PDF embeds are not converted.
 - Auth mode is Kerberos-only.
 - If a note is not already tracked in the mapping file, a new Confluence page is created instead of matching an existing page by title.
+- PlantUML publishing depends on the Confluence-side `plantuml` macro being available.
 
 ## Publishing
 

@@ -3,8 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import re
-import urllib.error
-import urllib.request
+import uuid
 from pathlib import Path
 
 import markdown
@@ -65,81 +64,22 @@ def convert_obsidian_image_embeds(text: str) -> str:
     return re.sub(r"!\[\[([^\]]+)\]\]", replace, text)
 
 
-def encode_plantuml(text: str) -> str:
-    import zlib
-
-    data = text.encode("utf-8")
-    compressed = zlib.compress(data, level=9)[2:-4]
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
-    result: list[str] = []
-    i = 0
-    while i < len(compressed):
-        b1 = compressed[i] if i < len(compressed) else 0
-        b2 = compressed[i + 1] if i + 1 < len(compressed) else 0
-        b3 = compressed[i + 2] if i + 2 < len(compressed) else 0
-        val = (b1 << 16) | (b2 << 8) | b3
-        result.append(alphabet[(val >> 18) & 0x3F])
-        result.append(alphabet[(val >> 12) & 0x3F])
-        result.append(alphabet[(val >> 6) & 0x3F])
-        result.append(alphabet[val & 0x3F])
-        i += 3
-    return "".join(result)
-
-
-def plantuml_to_svg(text: str, server: str) -> bytes:
-    svg_url = f"{server}/plantuml/svg/{encode_plantuml(text)}"
-    try:
-        with urllib.request.urlopen(svg_url, timeout=30) as response:
-            if response.status != 200:
-                body = response.read()[:300]
-                raise RuntimeError(f"PlantUML server returned {response.status}: {body}")
-            return response.read()
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"PlantUML server returned {exc.code}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Cannot reach PlantUML server at {server}: {exc.reason}") from exc
-
-
-def convert_plantuml_blocks(text: str, server: str | None) -> str:
-    if not server:
-        return text
-
-    counter = [0]
+def convert_plantuml_blocks(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         code = match.group(2).strip()
         if not code:
             return ""
-        name = f"puml_{counter[0]}.svg"
-        counter[0] += 1
+        macro_id = uuid.uuid4()
         return (
-            '<p><ac:image ac:height="auto">'
-            f'<ri:attachment ri:filename="{name}"/>'
-            "</ac:image></p>"
+            f'<ac:structured-macro ac:name="plantuml" ac:schema-version="1" ac:macro-id="{macro_id}">'
+            '<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>'
+            f"<ac:plain-text-body><![CDATA[{code}\n]]></ac:plain-text-body>"
+            "</ac:structured-macro>"
         )
 
     pattern = re.compile(r"```(plantuml|puml)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
     return pattern.sub(replace, text)
-
-
-def collect_plantuml_attachments(text: str, server: str | None) -> list[tuple[str, bytes]]:
-    if not server:
-        return []
-
-    attachments: list[tuple[str, bytes]] = []
-
-    def collect(match: re.Match[str]) -> str:
-        code = match.group(2).strip()
-        if not code:
-            return ""
-        name = f"puml_{len(attachments)}.svg"
-        attachments.append((name, plantuml_to_svg(code, server)))
-        return ""
-
-    pattern = re.compile(r"```(plantuml|puml)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-    pattern.sub(collect, text)
-    return attachments
 
 
 def escape_xml(text: str) -> str:
@@ -210,7 +150,7 @@ def render_markdown(text: str) -> str:
     )
 
 
-def collect_attachments(md_path: str, plantuml_server: str | None) -> dict[str, object]:
+def collect_attachments(md_path: str, plantuml_server: str | None = None) -> dict[str, object]:
     md_path = os.path.abspath(md_path)
     if not os.path.isfile(md_path):
         raise FileNotFoundError(f"File not found: {md_path}")
@@ -220,8 +160,7 @@ def collect_attachments(md_path: str, plantuml_server: str | None) -> dict[str, 
     text = Path(md_path).read_text(encoding="utf-8")
     text = convert_obsidian_image_embeds(text)
 
-    plantuml_attachments = collect_plantuml_attachments(text, plantuml_server)
-    text = convert_plantuml_blocks(text, plantuml_server)
+    text = convert_plantuml_blocks(text)
 
     html = render_markdown(text)
     html = fix_xhtml(html)
@@ -232,6 +171,6 @@ def collect_attachments(md_path: str, plantuml_server: str | None) -> dict[str, 
 
     attachments = [
         {"name": name, "data_b64": base64.b64encode(data).decode("ascii")}
-        for name, data in (plantuml_attachments + image_attachments)
+        for name, data in image_attachments
     ]
     return {"body": html, "attachments": attachments}

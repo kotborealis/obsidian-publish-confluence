@@ -36,8 +36,7 @@ Main entrypoints:
 
 - Image embeds like `![[image.png]]` and `![[image.png|400]]` are converted to Confluence attachments.
 - Non-image wiki links stay as text.
-- PlantUML is optional and enabled only through `OBSIDIAN_PUBLISH_CONFLUENCE_PLANTUML_SERVER`.
-- Without PlantUML configuration, `plantuml` / `puml` blocks should remain code blocks.
+- `plantuml` / `puml` fenced blocks are converted directly to the native Confluence `plantuml` macro.
 
 ## Environment variables
 
@@ -45,11 +44,10 @@ Main entrypoints:
 - `OBSIDIAN_PUBLISH_CONFLUENCE_SPACE`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE`
-- `OBSIDIAN_PUBLISH_CONFLUENCE_PLANTUML_SERVER`
 
 ## Things to avoid
 
 - Do not reintroduce title-based page adoption.
 - Do not hardcode company-specific defaults into the published package.
-- Do not assume PlantUML is always available.
+- Do not reintroduce attachment-based PlantUML rendering.
 - Do not break the existing mapping format unless migration is added deliberately.

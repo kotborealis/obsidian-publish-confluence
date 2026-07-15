@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,6 @@ class Config:
     space: str | None
     parent_id: str | None
     mapping_file: str
-    plantuml_server: str | None
 
     @property
     def api_url(self) -> str:
@@ -53,7 +53,6 @@ def config_from_env() -> Config:
         space=os.environ.get(f"{ENV_PREFIX}_SPACE"),
         parent_id=os.environ.get(f"{ENV_PREFIX}_PARENT_ID"),
         mapping_file=os.environ.get(f"{ENV_PREFIX}_MAPPING_FILE", DEFAULT_MAPPING_FILE),
-        plantuml_server=os.environ.get(f"{ENV_PREFIX}_PLANTUML_SERVER") or None,
     )
 
 
@@ -124,9 +123,37 @@ def confluence_put(config: Config, path: str, payload: dict[str, object]) -> dic
     return parse_json_response(curl(config, ["-X", "PUT", f"{config.api_url}{path}"], data=json.dumps(payload)))
 
 
+def confluence_delete(config: Config, path: str) -> dict[str, object] | None:
+    response_text = curl(config, ["-X", "DELETE", f"{config.api_url}{path}"])
+    if not response_text.strip():
+        return None
+    return parse_json_response(response_text)
+
+
 def fetch_page_version(config: Config, page_id: str) -> int:
     response = confluence_get(config, f"/content/{page_id}?expand=version")
+    if response.get("statusCode") == 404:
+        die(f"Mapped page ID {page_id} no longer exists in Confluence")
+    if "version" not in response or "number" not in response["version"]:
+        die(f"Confluence API response for page {page_id} does not include version info")
     return int(response["version"]["number"])
+
+
+def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str | None:
+    encoded_name = urllib.parse.quote(name)
+    response = confluence_get(config, f"/content/{page_id}/child/attachment?filename={encoded_name}")
+    results = response.get("results", [])
+    if results:
+        return str(results[0]["id"])
+    return None
+
+
+def delete_attachment_by_name(config: Config, page_id: str, name: str) -> bool:
+    attachment_id = find_attachment_id_by_name(config, page_id, name)
+    if not attachment_id:
+        return False
+    confluence_delete(config, f"/content/{attachment_id}")
+    return True
 
 
 def create_page(config: Config, title: str, body: str, parent_id: str, space_key: str) -> str:
@@ -192,9 +219,40 @@ def upload_attachments(config: Config, page_id: str, attachments: list[dict[str,
             )
             code = completed.stdout.strip()
             if code != "200":
-                info(f"WARNING: Failed to upload {name} (HTTP {code})")
-            else:
-                info(f"Uploaded: {name}")
+                error_body = completed.stderr.strip()
+                if code == "400" and delete_attachment_by_name(config, page_id, name):
+                    info(f"Attachment {name} already exists, replacing it...")
+                    retry = subprocess.run(
+                        [
+                            "curl",
+                            "-s",
+                            "-o",
+                            "/dev/null",
+                            "-w",
+                            "%{http_code}",
+                            "--negotiate",
+                            "-u",
+                            ":",
+                            "-H",
+                            "X-Atlassian-Token: no-check",
+                            "-F",
+                            f"file=@{path};filename={name}",
+                            f"{config.api_url}/content/{page_id}/child/attachment",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=True,
+                    )
+                    retry_code = retry.stdout.strip()
+                    if retry_code == "200":
+                        info(f"Uploaded: {name}")
+                        continue
+                    error_body = retry.stderr.strip()
+                    code = retry_code
+                detail = f"; {error_body}" if error_body else ""
+                info(f"WARNING: Failed to upload {name} (HTTP {code}{detail})")
+                continue
+            info(f"Uploaded: {name}")
 
 
 def load_mapping(mapping_file: str) -> dict[str, dict[str, object]]:
@@ -266,7 +324,6 @@ def publish_markdown(
         space=space_key or config.space,
         parent_id=parent_id or config.parent_id,
         mapping_file=config.mapping_file,
-        plantuml_server=config.plantuml_server,
     )
     config.require_publish_config()
     check_prereqs(config)
@@ -278,7 +335,7 @@ def publish_markdown(
     info(f"Parent ID:   {config.parent_id}")
     info("Converting markdown...")
 
-    convert_result = collect_attachments(abs_md, config.plantuml_server)
+    convert_result = collect_attachments(abs_md)
     html_body = str(convert_result["body"])
     attachments = list(convert_result["attachments"])
     if not html_body:
@@ -287,22 +344,28 @@ def publish_markdown(
     page_id = lookup_page_id(config.mapping_file, abs_md)
     if page_id:
         info(f"Found existing page ID: {page_id} (updating...)")
-        prev_version = fetch_page_version(config, page_id)
-        info(f"Current version: {prev_version}")
-        new_version = update_page(config, page_id, resolved_title, html_body, prev_version)
-        info(f"Updated to version: {new_version}")
-        upload_attachments(config, page_id, attachments)
-        save_mapping_entry(
-            config.mapping_file,
-            config.base_url or "",
-            abs_md,
-            page_id,
-            resolved_title,
-            config.parent_id or "",
-            config.space or "",
-            new_version,
-        )
-    else:
+        try:
+            prev_version = fetch_page_version(config, page_id)
+        except RuntimeError as exc:
+            info(f"Stored page ID {page_id} is stale ({exc}); creating a new page...")
+            page_id = None
+        else:
+            info(f"Current version: {prev_version}")
+            new_version = update_page(config, page_id, resolved_title, html_body, prev_version)
+            info(f"Updated to version: {new_version}")
+            upload_attachments(config, page_id, attachments)
+            save_mapping_entry(
+                config.mapping_file,
+                config.base_url or "",
+                abs_md,
+                page_id,
+                resolved_title,
+                config.parent_id or "",
+                config.space or "",
+                new_version,
+            )
+            return f"{config.base_url.rstrip('/')}/spaces/{config.space}/pages/{page_id}"
+    if not page_id:
         info(f"Creating new page under parent {config.parent_id}...")
         page_id = create_page(config, resolved_title, html_body, config.parent_id or "", config.space or "")
         info(f"Created page ID: {page_id}")

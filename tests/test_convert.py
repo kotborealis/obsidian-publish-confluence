@@ -30,6 +30,18 @@ class ConvertTests(unittest.TestCase):
             self.assertIn("![[some-note]]", result["body"])
             self.assertEqual(result["attachments"], [])
 
+    def test_plantuml_block_becomes_confluence_macro_without_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("```plantuml\n@startuml\nAlice -> Bob: ping\n@enduml\n```\n", encoding="utf-8")
+
+            result = collect_attachments(str(note), None)
+
+            self.assertIn('ac:name="plantuml"', result["body"])
+            self.assertIn('ac:name="atlassian-macro-output-type">INLINE</ac:parameter>', result["body"])
+            self.assertIn('@startuml\nAlice -> Bob: ping\n@enduml', result["body"])
+            self.assertEqual(result["attachments"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
