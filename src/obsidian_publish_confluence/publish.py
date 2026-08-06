@@ -176,7 +176,7 @@ def fetch_page_details(config: Config, page_id: str) -> tuple[int, str]:
     if not isinstance(title, str) or not title:
         die(f"Confluence API response for page {page_id} does not include title info")
     version_dict = cast(JsonDict, version)
-    return int(version_dict["number"]), title
+    return int(version_dict["number"]), cast(str, title)
 
 
 def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str | None:
