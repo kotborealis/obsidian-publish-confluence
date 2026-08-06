@@ -3,31 +3,22 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 
 from .convert import AttachmentJson, ConvertResult, collect_attachments
 
 ENV_PREFIX = "OBSIDIAN_PUBLISH_CONFLUENCE"
-DEFAULT_MAPPING_FILE = os.path.expanduser("~/.config/obsidian-publish-confluence/mapping.json")
+FRONTMATTER_RE = re.compile(r"\A(?:\ufeff)?---[ \t]*\n(?P<body>.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+CONFLUENCE_URL_RE = re.compile(r"/pages/(\d+)(?:/|$)")
 
 JsonDict = dict[str, Any]
-
-
-class MappingEntry(TypedDict):
-    page_id: str
-    title: str
-    parent_id: str
-    space_key: str
-    url: str
-    version: int
-    updated_at: str
 
 
 class ConfluenceApiError(RuntimeError):
@@ -63,7 +54,6 @@ class Config:
     base_url: str | None
     space: str | None
     parent_id: str | None
-    mapping_file: str
 
     @property
     def api_url(self) -> str:
@@ -87,7 +77,6 @@ def config_from_env() -> Config:
         base_url=os.environ.get(f"{ENV_PREFIX}_BASE_URL"),
         space=os.environ.get(f"{ENV_PREFIX}_SPACE"),
         parent_id=os.environ.get(f"{ENV_PREFIX}_PARENT_ID"),
-        mapping_file=os.environ.get(f"{ENV_PREFIX}_MAPPING_FILE", DEFAULT_MAPPING_FILE),
     )
 
 
@@ -173,7 +162,7 @@ def confluence_delete(config: Config, path: str) -> JsonDict | None:
     return parse_json_response(response_text)
 
 
-def fetch_page_version(config: Config, page_id: str) -> int:
+def fetch_page_details(config: Config, page_id: str) -> tuple[int, str]:
     try:
         response = confluence_get(config, f"/content/{page_id}?expand=version")
     except ConfluenceApiError as exc:
@@ -183,8 +172,11 @@ def fetch_page_version(config: Config, page_id: str) -> int:
     version = response.get("version")
     if not isinstance(version, dict) or "number" not in version:
         die(f"Confluence API response for page {page_id} does not include version info")
+    title = response.get("title")
+    if not isinstance(title, str) or not title:
+        die(f"Confluence API response for page {page_id} does not include title info")
     version_dict = cast(JsonDict, version)
-    return int(version_dict["number"])
+    return int(version_dict["number"]), title
 
 
 def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str | None:
@@ -310,66 +302,57 @@ def upload_attachments(config: Config, page_id: str, attachments: list[Attachmen
             info(f"Uploaded: {name}")
 
 
-def load_mapping(mapping_file: str) -> dict[str, MappingEntry]:
-    path = Path(mapping_file)
-    if not path.exists():
-        return {}
-    return cast(dict[str, MappingEntry], json.loads(path.read_text(encoding="utf-8")))
+def page_id_from_url(page_url: str) -> str:
+    parsed = urllib.parse.urlparse(page_url)
+    query_page_id = urllib.parse.parse_qs(parsed.query).get("pageId")
+    if query_page_id and query_page_id[0]:
+        return query_page_id[0]
+    path_match = CONFLUENCE_URL_RE.search(parsed.path)
+    if path_match:
+        return path_match.group(1)
+    die(f"Cannot extract Confluence page ID from URL: {page_url}")
+    raise AssertionError("unreachable")
 
 
-def lookup_page_id(mapping_file: str, md_path: str) -> str | None:
-    entry = load_mapping(mapping_file).get(md_path)
-    page_id = entry.get("page_id") if entry else None
-    return str(page_id) if page_id else None
+def make_page_url(config: Config, page_id: str) -> str:
+    base_url = config.base_url or ""
+    space = config.space or ""
+    return f"{base_url.rstrip('/')}/spaces/{space}/pages/{page_id}"
 
 
-def save_mapping_entry(
-    mapping_file: str,
-    base_url: str,
-    md_path: str,
-    page_id: str,
-    title: str,
-    parent_id: str,
-    space_key: str,
-    version: int,
-) -> None:
-    mapping = load_mapping(mapping_file)
-    url = f"{base_url.rstrip('/')}/spaces/{space_key}/pages/{page_id}"
-    mapping[md_path] = {
-        "page_id": page_id,
-        "title": title,
-        "parent_id": parent_id,
-        "space_key": space_key,
-        "url": url,
-        "version": version,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    path = Path(mapping_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
+def read_frontmatter_page_url(md_path: str) -> str | None:
+    text = Path(md_path).read_text(encoding="utf-8")
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return None
+    for line in match.group("body").splitlines():
+        if line.strip().startswith("confluence_url"):
+            return line.split(":", 1)[1].strip().strip("'\"")
+    return None
 
 
-def cmd_check(mapping_file: str) -> int:
-    path = Path(mapping_file)
-    if not path.exists():
-        print(f"No mapping file found at {mapping_file}")
-        return 0
-    mapping = load_mapping(mapping_file)
-    if not mapping:
-        print("Mapping file is empty.")
-        return 0
-    print(f"{len(mapping)} tracked page(s):")
-    for source_path, entry in sorted(mapping.items()):
-        status = "OK" if Path(source_path).exists() else "MISSING"
-        print(f"  [{status}] {source_path}")
-        print(f"          -> {entry['url']}")
-    return 0
+def save_frontmatter_page_url(md_path: str, page_url: str) -> None:
+    text = Path(md_path).read_text(encoding="utf-8")
+    page_url_line = f'confluence_url: "{page_url}"'
+    match = FRONTMATTER_RE.match(text)
+    if match:
+        body = match.group("body")
+        updated_body, count = re.subn(
+            r"^confluence_url\s*:.*$", page_url_line, body, count=1, flags=re.MULTILINE
+        )
+        if not count:
+            updated_body = f"{page_url_line}\n{body}"
+        text = text[: match.start("body")] + updated_body + text[match.end("body") :]
+    else:
+        text = f"---\n{page_url_line}\n---\n{text}"
+    Path(md_path).write_text(text, encoding="utf-8")
 
 
 def publish_markdown(
     config: Config,
     md_file: str,
     title: str | None = None,
+    page_url: str | None = None,
     space_key: str | None = None,
     parent_id: str | None = None,
     base_url: str | None = None,
@@ -379,7 +362,6 @@ def publish_markdown(
         base_url=base_url or config.base_url,
         space=space_key or config.space,
         parent_id=parent_id or config.parent_id,
-        mapping_file=config.mapping_file,
     )
     config.require_publish_config()
     if not dry_run:
@@ -398,8 +380,9 @@ def publish_markdown(
     if not html_body:
         die("Conversion produced empty body")
 
+    page_url = page_url or read_frontmatter_page_url(abs_md)
+    page_id = page_id_from_url(page_url) if page_url else None
     if dry_run:
-        page_id = lookup_page_id(config.mapping_file, abs_md)
         action = "update" if page_id else "create"
         info(f"Dry run:     {action}")
         info(f"Attachments: {len(attachments)}")
@@ -409,32 +392,22 @@ def publish_markdown(
         info(f"PlantUML:    {plantuml_count} macro(s)")
         return "DRY-RUN"
 
-    page_id = lookup_page_id(config.mapping_file, abs_md)
     if page_id:
         info(f"Found existing page ID: {page_id} (updating...)")
         try:
-            prev_version = fetch_page_version(config, page_id)
+            prev_version, existing_title = fetch_page_details(config, page_id)
         except RuntimeError as exc:
             info(f"Stored page ID {page_id} is stale ({exc}); creating a new page...")
             page_id = None
+            page_url = None
         else:
             info(f"Current version: {prev_version}")
-            new_version = update_page(config, page_id, resolved_title, html_body, prev_version)
+            new_version = update_page(config, page_id, existing_title, html_body, prev_version)
             info(f"Updated to version: {new_version}")
             upload_attachments(config, page_id, attachments)
-            save_mapping_entry(
-                config.mapping_file,
-                config.base_url or "",
-                abs_md,
-                page_id,
-                resolved_title,
-                config.parent_id or "",
-                config.space or "",
-                new_version,
-            )
-            base_url = config.base_url or ""
-            space = config.space or ""
-            return f"{base_url.rstrip('/')}/spaces/{space}/pages/{page_id}"
+            page_url = make_page_url(config, page_id)
+            save_frontmatter_page_url(abs_md, page_url)
+            return page_url
     if not page_id:
         info(f"Creating new page under parent {config.parent_id}...")
         page_id = create_page(
@@ -442,17 +415,8 @@ def publish_markdown(
         )
         info(f"Created page ID: {page_id}")
         upload_attachments(config, page_id, attachments)
-        save_mapping_entry(
-            config.mapping_file,
-            config.base_url or "",
-            abs_md,
-            page_id,
-            resolved_title,
-            config.parent_id or "",
-            config.space or "",
-            1,
-        )
+        page_url = make_page_url(config, page_id)
+        save_frontmatter_page_url(abs_md, page_url)
 
-    base_url = config.base_url or ""
-    space = config.space or ""
-    return f"{base_url.rstrip('/')}/spaces/{space}/pages/{page_id}"
+    assert page_url is not None
+    return page_url

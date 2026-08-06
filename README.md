@@ -12,7 +12,7 @@ Versioning is derived from Git tags for releases.
 ## Features
 
 - Create or update Confluence pages from Markdown.
-- Track `markdown -> page_id` mappings locally.
+- Store the Confluence page URL in note frontmatter.
 - Upload attachments on both page create and update.
 - Convert Obsidian image embeds like `![[image.png]]` and `![[image.png|400]]`.
 - Convert fenced code blocks to Confluence code macros.
@@ -45,11 +45,6 @@ Set these environment variables:
 - `OBSIDIAN_PUBLISH_CONFLUENCE_BASE_URL`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_SPACE`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID`
-- `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE` (optional)
-
-Defaults:
-
-- `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE` defaults to `~/.config/obsidian-publish-confluence/mapping.json`
 
 ## Usage
 
@@ -60,12 +55,14 @@ export OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID="123456"
 
 obsidian-publish-confluence note.md
 obsidian-publish-confluence note.md --title "Custom title"
+obsidian-publish-confluence note.md --page-url "https://confluence.example.com/spaces/DOCS/pages/123456"
 obsidian-publish-confluence note.md --space DEV --parent-id 987654
 obsidian-publish-confluence note.md --dry-run
-obsidian-publish-confluence --check
 ```
 
 `--dry-run` converts the note, prints the intended action and attachment list, and skips Confluence API calls.
+
+The Confluence page URL is stored in the note frontmatter as `confluence_url`. An explicit `--page-url` takes precedence and is saved to the note after a successful publish.
 
 ## Kerberos
 
@@ -94,7 +91,7 @@ For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release
 - Non-image wiki links stay plain text.
 - PDF embeds are not converted.
 - Auth mode is Kerberos-only.
-- If a note is not already tracked in the mapping file, a new Confluence page is created instead of matching an existing page by title.
+- If a note has no `confluence_url` and `--page-url` is not provided, a new Confluence page is created.
 - PlantUML publishing depends on the Confluence-side `plantuml` macro being available.
 
 ## Publishing

@@ -30,8 +30,8 @@ Main entrypoints:
 ## Confluence behavior
 
 - Auth mode is Kerberos-only.
-- Existing pages are updated only when the markdown file is already tracked in the mapping file.
-- If there is no mapping entry, the tool creates a new page instead of matching by title.
+- Existing pages are updated only when `confluence_url` is in frontmatter or `--page-url` is provided.
+- If there is no page ID, the tool creates a new page instead of matching by title.
 - Attachments must be uploaded on both create and update.
 - For `curl` POST/PUT requests, JSON payload must be sent with `--data-binary @-`.
 - API errors should surface Confluence HTTP status and message instead of generic key errors.
@@ -50,11 +50,10 @@ Main entrypoints:
 - `OBSIDIAN_PUBLISH_CONFLUENCE_BASE_URL`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_SPACE`
 - `OBSIDIAN_PUBLISH_CONFLUENCE_PARENT_ID`
-- `OBSIDIAN_PUBLISH_CONFLUENCE_MAPPING_FILE`
 
 ## Things to avoid
 
 - Do not reintroduce title-based page adoption.
 - Do not hardcode company-specific defaults into the published package.
 - Do not reintroduce attachment-based PlantUML rendering.
-- Do not break the existing mapping format unless migration is added deliberately.
+- Page association is stored in Markdown frontmatter; do not reintroduce title-based page adoption.
