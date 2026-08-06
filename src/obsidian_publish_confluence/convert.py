@@ -138,7 +138,10 @@ def convert_code_blocks(html: str) -> str:
         parts.append("</ac:structured-macro>")
         return "\n".join(parts)
 
-    pattern = re.compile(r'<pre><code(?:\s+class="language-(\w+)")?>(.*?)</code></pre>', re.DOTALL)
+    pattern = re.compile(
+        r'<pre(?:\s[^>]*)?><code(?:\s+class="language-(\w+)")?>(.*?)</code></pre>',
+        re.DOTALL,
+    )
     return pattern.sub(replace, html)
 
 
@@ -200,9 +203,13 @@ def convert_local_images_to_ac(
 def render_markdown(text: str) -> str:
     return markdown.markdown(
         text,
-        extensions=["fenced_code", "tables", "codehilite", "nl2br", "sane_lists"],
+        extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
         output_format="html",
     )
+
+
+def remove_frontmatter(text: str) -> str:
+    return re.sub(r"\A(?:\ufeff)?---\s*\n.*?\n---\s*(?:\n|\Z)", "", text, count=1, flags=re.DOTALL)
 
 
 def collect_attachments(md_path: str, plantuml_server: str | None = None) -> ConvertResult:
@@ -212,7 +219,7 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> Con
 
     base_dir = os.path.dirname(md_path)
     vault_root = find_vault_root(base_dir)
-    text = Path(md_path).read_text(encoding="utf-8")
+    text = remove_frontmatter(Path(md_path).read_text(encoding="utf-8"))
     text, image_refs = convert_obsidian_image_embeds(text, md_path)
 
     text, plantuml_replacements = extract_plantuml_macros(text)

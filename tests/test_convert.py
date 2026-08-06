@@ -4,10 +4,42 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from obsidian_publish_confluence.convert import ConvertResult, collect_attachments
+from obsidian_publish_confluence.convert import (
+    ConvertResult,
+    collect_attachments,
+)
 
 
 class ConvertTests(unittest.TestCase):
+    def test_fenced_code_block_becomes_confluence_code_macro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text(
+                "```yaml\nextensions:\n\tprovidesServices:\n\t  - test_service\n```\n",
+                encoding="utf-8",
+            )
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertIn('<ac:structured-macro ac:name="code"', result["body"])
+            self.assertIn('<ac:parameter ac:name="language">yaml</ac:parameter>', result["body"])
+            self.assertIn("providesServices:", result["body"])
+            self.assertNotIn("<pre", result["body"])
+
+    def test_frontmatter_is_not_published(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text(
+                "---\ntitle: Hidden title\ntags:\n  - internal\n---\n\n# Published title\n",
+                encoding="utf-8",
+            )
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertNotIn("Hidden title", result["body"])
+            self.assertNotIn("internal", result["body"])
+            self.assertIn("Published title", result["body"])
+
     def test_obsidian_image_embed_is_converted_and_attached(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
