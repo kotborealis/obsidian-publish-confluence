@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import math
 import os
 import re
+import textwrap
 import uuid
 from pathlib import Path
 from typing import NamedTuple, TypedDict
@@ -22,6 +25,7 @@ class ImageRef(NamedTuple):
     source: str
     attachment_name: str
     width: int | None
+    data: bytes | None = None
 
 
 class ConvertResult(TypedDict):
@@ -39,6 +43,10 @@ def find_vault_root(start_dir: str) -> Path:
 
 def is_image_path(path_text: str) -> bool:
     return Path(path_text.strip()).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def is_canvas_path(path_text: str) -> bool:
+    return Path(path_text.strip()).suffix.lower() == ".canvas"
 
 
 def escape_markdown_url(url: str) -> str:
@@ -76,6 +84,19 @@ def resolve_attachment_path(src: str, base_dir: str, vault_root: Path) -> Path |
     return None
 
 
+def resolve_canvas_path(src: str, base_dir: str, vault_root: Path) -> Path | None:
+    resolved = resolve_attachment_path(src, base_dir, vault_root)
+    if resolved is not None:
+        return resolved
+
+    normalized = src.strip()
+    if not normalized:
+        return None
+    pattern = normalized if len(Path(normalized).parts) > 1 else Path(normalized).name
+    matches = sorted(path for path in vault_root.rglob(pattern) if path.is_file())
+    return matches[0] if matches else None
+
+
 def convert_obsidian_image_embeds(text: str, md_path: str) -> tuple[str, dict[str, ImageRef]]:
     replacements: dict[str, ImageRef] = {}
 
@@ -92,6 +113,241 @@ def convert_obsidian_image_embeds(text: str, md_path: str) -> tuple[str, dict[st
         return f"![]({escape_markdown_url(token)})"
 
     return re.sub(r"!\[\[([^\]]+)\]\]", replace, text), replacements
+
+
+def canvas_attachment_name(md_path: str, source: str) -> str:
+    return str(Path(make_attachment_name(md_path, source)).with_suffix(".svg").name)
+
+
+CANVAS_COLORS = {
+    "1": "#e93147",
+    "2": "#f49d37",
+    "3": "#e0de71",
+    "4": "#44cf6e",
+    "5": "#53dfdd",
+    "6": "#a882ff",
+}
+
+
+def canvas_number(node: dict[str, object], key: str, default: float = 0) -> float:
+    value = node.get(key, default)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return default
+
+
+def canvas_node_label(node: dict[str, object]) -> str:
+    node_type = node.get("type")
+    if node_type == "text":
+        value = node.get("text", "")
+    elif node_type == "file":
+        value = Path(str(node.get("file", ""))).name
+    elif node_type == "link":
+        value = node.get("url", "")
+    elif node_type == "group":
+        value = node.get("label", "")
+    else:
+        value = node.get("text") or node.get("label") or node.get("file") or node.get("url")
+    return value if isinstance(value, str) else str(value or "")
+
+
+def canvas_node_color(node: dict[str, object], default: str) -> str:
+    color = node.get("color")
+    if not isinstance(color, str):
+        return default
+    if color in CANVAS_COLORS:
+        return CANVAS_COLORS[color]
+    if re.fullmatch(r"#[0-9a-fA-F]{3,8}", color):
+        return color
+    return default
+
+
+def canvas_text_lines(text: str, width: float) -> list[str]:
+    max_chars = max(1, int(width / 8))
+    lines: list[str] = []
+    for paragraph in text.splitlines() or [""]:
+        lines.extend(
+            textwrap.wrap(
+                paragraph,
+                width=max_chars,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            or [""]
+        )
+    return lines
+
+
+def canvas_node_geometry(
+    node: dict[str, object], offset_x: float, offset_y: float
+) -> tuple[float, ...]:
+    x = canvas_number(node, "x") - offset_x
+    y = canvas_number(node, "y") - offset_y
+    width = max(0, canvas_number(node, "width"))
+    height = max(0, canvas_number(node, "height"))
+    return x, y, width, height
+
+
+def canvas_edge_point(
+    node: dict[str, object], side: object, offset_x: float, offset_y: float
+) -> tuple[float, float]:
+    x, y, width, height = canvas_node_geometry(node, offset_x, offset_y)
+    side_name = str(side or "").lower()
+    if side_name == "top":
+        return x + width / 2, y
+    if side_name == "right":
+        return x + width, y + height / 2
+    if side_name == "bottom":
+        return x + width / 2, y + height
+    if side_name == "left":
+        return x, y + height / 2
+    return x + width / 2, y + height / 2
+
+
+def render_canvas_svg(data: object) -> bytes:
+    if not isinstance(data, dict) or not isinstance(data.get("nodes", []), list):
+        raise ValueError("Invalid canvas: expected a JSON object with a nodes list")
+    if not isinstance(data.get("edges", []), list):
+        raise ValueError("Invalid canvas: expected edges to be a list")
+
+    nodes = [node for node in data["nodes"] if isinstance(node, dict)]
+    edges = [edge for edge in data["edges"] if isinstance(edge, dict)]
+    if nodes:
+        min_x = min(canvas_number(node, "x") for node in nodes)
+        min_y = min(canvas_number(node, "y") for node in nodes)
+        max_x = max(
+            canvas_number(node, "x") + max(0, canvas_number(node, "width")) for node in nodes
+        )
+        max_y = max(
+            canvas_number(node, "y") + max(0, canvas_number(node, "height")) for node in nodes
+        )
+    else:
+        min_x = min_y = max_x = max_y = 0
+
+    margin = 40
+    svg_width = max(1, max_x - min_x + margin * 2)
+    svg_height = max(1, max_y - min_y + margin * 2)
+    view_min_x = min_x - margin
+    view_min_y = min_y - margin
+    node_by_id = {str(node["id"]): node for node in nodes if isinstance(node.get("id"), str)}
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="{format(svg_width, ".15g")}" height="{format(svg_height, ".15g")}" '
+        f'viewBox="{format(view_min_x, ".15g")} {format(view_min_y, ".15g")} '
+        f'{format(svg_width, ".15g")} {format(svg_height, ".15g")}">',
+        '<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" '
+        'orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" '
+        'fill="#64748b"/></marker></defs>',
+        f'<rect x="{format(view_min_x, ".15g")}" y="{format(view_min_y, ".15g")}" '
+        f'width="{format(svg_width, ".15g")}" height="{format(svg_height, ".15g")}" '
+        'fill="#ffffff"/>',
+    ]
+
+    for node in nodes:
+        if node.get("type") != "group":
+            continue
+        x, y, width, height = canvas_node_geometry(node, 0, 0)
+        color = canvas_node_color(node, "#94a3b8")
+        parts.append(
+            f'<rect x="{format(x, ".15g")}" y="{format(y, ".15g")}" '
+            f'width="{format(width, ".15g")}" height="{format(height, ".15g")}" '
+            f'rx="12" fill="{color}" fill-opacity="0.12" stroke="{color}" '
+            'stroke-width="2" stroke-dasharray="8 5"/>'
+        )
+        label = canvas_node_label(node)
+        if label:
+            parts.append(
+                f'<text x="{format(x + 16, ".15g")}" y="{format(y - 10, ".15g")}" '
+                'font-family="Arial, sans-serif" font-size="18" font-weight="bold" '
+                f'fill="{color}">{escape_xml(label)}</text>'
+            )
+
+    for edge in edges:
+        from_node = node_by_id.get(str(edge.get("fromNode")))
+        to_node = node_by_id.get(str(edge.get("toNode")))
+        if from_node is None or to_node is None:
+            continue
+        start_x, start_y = canvas_edge_point(from_node, edge.get("fromSide"), 0, 0)
+        end_x, end_y = canvas_edge_point(to_node, edge.get("toSide"), 0, 0)
+        parts.append(
+            f'<line x1="{format(start_x, ".15g")}" y1="{format(start_y, ".15g")}" '
+            f'x2="{format(end_x, ".15g")}" y2="{format(end_y, ".15g")}" '
+            'stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>'
+        )
+        label = edge.get("label")
+        if isinstance(label, str) and label:
+            label_x = (start_x + end_x) / 2
+            label_y = (start_y + end_y) / 2 - 5
+            parts.append(
+                f'<text x="{format(label_x, ".15g")}" y="{format(label_y, ".15g")}" '
+                'text-anchor="middle" font-family="Arial, sans-serif" font-size="14" '
+                'fill="#334155" paint-order="stroke" stroke="#ffffff" stroke-width="5">'
+                f"{escape_xml(label)}</text>"
+            )
+
+    for node in nodes:
+        if node.get("type") == "group":
+            continue
+        x, y, width, height = canvas_node_geometry(node, 0, 0)
+        color = canvas_node_color(node, "#64748b")
+        parts.append(
+            f'<rect x="{format(x, ".15g")}" y="{format(y, ".15g")}" '
+            f'width="{format(width, ".15g")}" height="{format(height, ".15g")}" '
+            f'rx="8" fill="#ffffff" stroke="{color}" stroke-width="2"/>'
+        )
+        lines = canvas_text_lines(canvas_node_label(node), width - 24)
+        line_height = 22
+        first_y = y + height / 2 - (len(lines) - 1) * line_height / 2
+        for index, line in enumerate(lines):
+            parts.append(
+                f'<text x="{format(x + width / 2, ".15g")}" '
+                f'y="{format(first_y + index * line_height, ".15g")}" '
+                'text-anchor="middle" dominant-baseline="middle" '
+                'font-family="Arial, sans-serif" font-size="16" fill="#1e293b">'
+                f"{escape_xml(line)}</text>"
+            )
+
+    parts.append("</svg>")
+    return "\n".join(parts).encode("utf-8")
+
+
+def render_canvas_file(path: Path) -> bytes:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Invalid canvas JSON in {path}: {error}") from error
+    return render_canvas_svg(data)
+
+
+def convert_obsidian_canvas_embeds(
+    text: str,
+    md_path: str,
+    base_dir: str,
+    vault_root: Path,
+    image_refs: dict[str, ImageRef],
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        target = match.group(1).strip()
+        path_text, _, suffix = target.partition("|")
+        path_text = path_text.strip()
+        if not is_canvas_path(path_text):
+            return match.group(0)
+
+        resolved = resolve_canvas_path(path_text, base_dir, vault_root)
+        if resolved is None:
+            raise FileNotFoundError(f"Canvas file not found: {path_text}")
+
+        token = f"OPCCANVASTOKEN{len(image_refs)}"
+        image_refs[token] = ImageRef(
+            path_text,
+            canvas_attachment_name(md_path, path_text),
+            int(suffix.strip()) if suffix.strip().isdigit() else None,
+            render_canvas_file(resolved),
+        )
+        return f"![]({escape_markdown_url(token)})"
+
+    return re.sub(r"!\[\[([^\]]+)\]\]", replace, text)
 
 
 def extract_plantuml_macros(text: str) -> tuple[str, dict[str, str]]:
@@ -163,6 +419,9 @@ def collect_local_image_attachments(
             return ""
         src = src.replace("%20", " ")
         image_ref = image_refs.get(src)
+        if image_ref and image_ref.data is not None:
+            attachments.append((image_ref.attachment_name, image_ref.data))
+            return ""
         resolved = resolve_attachment_path(
             image_ref.source if image_ref else src, base_dir, vault_root
         )
@@ -185,6 +444,12 @@ def convert_local_images_to_ac(
             return full_tag
         src = src.replace("%20", " ")
         image_ref = image_refs.get(src)
+        if image_ref and image_ref.data is not None:
+            attrs = ' ac:height="auto"'
+            if image_ref.width is not None:
+                attrs += f' ac:width="{image_ref.width}"'
+            escaped_name = escape_xml(image_ref.attachment_name)
+            return f'<ac:image{attrs}><ri:attachment ri:filename="{escaped_name}"/></ac:image>'
         resolved = resolve_attachment_path(
             image_ref.source if image_ref else src, base_dir, vault_root
         )
@@ -221,6 +486,7 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> Con
     vault_root = find_vault_root(base_dir)
     text = remove_frontmatter(Path(md_path).read_text(encoding="utf-8"))
     text, image_refs = convert_obsidian_image_embeds(text, md_path)
+    text = convert_obsidian_canvas_embeds(text, md_path, base_dir, vault_root, image_refs)
 
     text, plantuml_replacements = extract_plantuml_macros(text)
 

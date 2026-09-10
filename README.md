@@ -15,6 +15,7 @@ Versioning is derived from Git tags for releases.
 - Store the Confluence page URL in note frontmatter.
 - Upload attachments on both page create and update.
 - Convert Obsidian image embeds like `![[image.png]]` and `![[image.png|400]]`.
+- Convert Obsidian Canvas embeds like `![[board.canvas]]` to SVG attachments while preserving node coordinates.
 - Convert fenced code blocks to Confluence code macros.
 - Convert PlantUML blocks to the native Confluence `plantuml` macro.
 - Support `--dry-run` to inspect conversion and publish actions without changing Confluence.
@@ -85,7 +86,8 @@ For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release
 
 ## Limitations
 
-- Only image-style Obsidian embeds are converted to Confluence attachments.
+- Image and Canvas Obsidian embeds are converted to Confluence attachments.
+- Canvas embeds are rendered as SVG with text, file, link, group, and edge data; embedded files are shown as labels.
 - Attachment names are namespaced automatically to avoid collisions between files with the same basename.
 - Numeric Obsidian image suffixes like `![[image.png|640]]` become Confluence image widths.
 - Non-image wiki links stay plain text.

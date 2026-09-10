@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from obsidian_publish_confluence.convert import (
     ConvertResult,
     collect_attachments,
+    render_canvas_svg,
 )
 
 
@@ -111,6 +113,76 @@ class ConvertTests(unittest.TestCase):
             self.assertNotEqual(attachment_names[0], attachment_names[1])
             for name in attachment_names:
                 self.assertIn(name, result["body"])
+
+    def test_canvas_embed_becomes_svg_attachment_with_original_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            canvas = Path(tmp) / "board.canvas"
+            note.write_text("![[board.canvas|640]]\n", encoding="utf-8")
+            canvas.write_text(
+                '{"nodes": ['
+                '{"id": "a", "type": "text", "text": "A", '
+                '"x": -10, "y": 20, "width": 100, "height": 50}, '
+                '{"id": "b", "type": "text", "text": "B", '
+                '"x": 190, "y": 20, "width": 100, "height": 50}], '
+                '"edges": [{"fromNode": "a", "fromSide": "right", '
+                '"toNode": "b", "toSide": "left", "label": "next"}]}',
+                encoding="utf-8",
+            )
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertEqual(len(result["attachments"]), 1)
+            attachment = result["attachments"][0]
+            self.assertTrue(attachment["name"].endswith("-board.svg"))
+            self.assertIn('ri:attachment ri:filename="', result["body"])
+            self.assertIn(attachment["name"], result["body"])
+            self.assertIn('ac:width="640"', result["body"])
+
+            svg = base64.b64decode(attachment["data_b64"]).decode("utf-8")
+            self.assertIn('viewBox="-50 -20 340 100"', svg)
+            self.assertIn('x="-10" y="20" width="100" height="50"', svg)
+            self.assertIn('x="190" y="20" width="100" height="50"', svg)
+            self.assertIn('x1="90" y1="45" x2="190" y2="45"', svg)
+            self.assertIn(">next</text>", svg)
+
+    def test_missing_canvas_embed_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("![[missing.canvas]]\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileNotFoundError, "Canvas file not found"):
+                collect_attachments(str(note), None)
+
+    def test_canvas_group_label_is_above_nodes_at_group_top(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "group",
+                        "type": "group",
+                        "label": "Group",
+                        "x": 0,
+                        "y": 0,
+                        "width": 200,
+                        "height": 100,
+                    },
+                    {
+                        "id": "node",
+                        "type": "text",
+                        "text": "Node",
+                        "x": 0,
+                        "y": 0,
+                        "width": 100,
+                        "height": 50,
+                    },
+                ],
+                "edges": [],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('<text x="16" y="-10"', svg)
+        self.assertIn('<rect x="0" y="0" width="100" height="50"', svg)
 
 
 if __name__ == "__main__":
