@@ -28,6 +28,51 @@ class ConvertTests(unittest.TestCase):
             self.assertIn("providesServices:", result["body"])
             self.assertNotIn("<pre", result["body"])
 
+    def test_checkbox_list_becomes_confluence_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("* [ ] todo\n* [x] done\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            body = result["body"]
+            self.assertEqual(body.count("<ac:task>"), 2)
+            self.assertIn("<ac:task-id>1</ac:task-id>", body)
+            self.assertIn("<ac:task-id>2</ac:task-id>", body)
+            self.assertIn("<ac:task-status>incomplete</ac:task-status>", body)
+            self.assertIn("<ac:task-status>complete</ac:task-status>", body)
+            self.assertIn("<ac:task-body>todo</ac:task-body>", body)
+            self.assertIn("<ac:task-body>done</ac:task-body>", body)
+            self.assertNotIn("<ac:task-body>[", body)
+
+    def test_nested_checkbox_lists_become_nested_confluence_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text(
+                "* [ ] parent [link](https://example.com)\n    * [x] child\n",
+                encoding="utf-8",
+            )
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            body = result["body"]
+            self.assertEqual(body.count("<ac:task-list>"), 2)
+            self.assertEqual(body.count("<ac:task>"), 2)
+            self.assertIn('<a href="https://example.com">link</a>', body)
+            self.assertLess(body.index("<ac:task-id>1"), body.index("<ac:task-id>2"))
+            self.assertNotIn("[ ]", body)
+            self.assertNotIn("[x]", body)
+
+    def test_checkbox_in_code_block_stays_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("```text\n* [ ] not a task\n```\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertEqual(result["body"].count("<ac:task>"), 0)
+            self.assertIn("* [ ] not a task", result["body"])
+
     def test_frontmatter_is_not_published(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"

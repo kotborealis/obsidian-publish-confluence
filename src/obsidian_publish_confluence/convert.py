@@ -28,6 +28,15 @@ class ImageRef(NamedTuple):
     data: bytes | None = None
 
 
+class HtmlListItem(NamedTuple):
+    start: int
+    content_start: int
+    content_end: int
+    end: int
+    start_tag: str
+    end_tag: str
+
+
 class ConvertResult(TypedDict):
     body: str
     attachments: list[AttachmentJson]
@@ -408,6 +417,154 @@ def fix_xhtml(html: str) -> str:
     return html
 
 
+HTML_LIST_TAG_RE = re.compile(r"<(/?)(ul|li)\b[^>]*>", re.IGNORECASE)
+HTML_UL_OPEN_RE = re.compile(r"<ul\b[^>]*>", re.IGNORECASE)
+TASK_MARKER_RE = re.compile(r"^\s*\[([ xX])\](?:\s+|$)")
+
+
+def find_matching_list(html: str, opening: re.Match[str]) -> tuple[int, int] | None:
+    depth = 1
+    for match in HTML_LIST_TAG_RE.finditer(html, opening.end()):
+        if match.group(2).lower() != "ul":
+            continue
+        if match.group(1):
+            depth -= 1
+            if depth == 0:
+                return match.start(), match.end()
+        else:
+            depth += 1
+    return None
+
+
+def find_immediate_list_items(inner: str) -> list[HtmlListItem]:
+    items: list[HtmlListItem] = []
+    list_depth = 0
+    current: tuple[int, int, str] | None = None
+
+    for match in HTML_LIST_TAG_RE.finditer(inner):
+        tag = match.group(2).lower()
+        if tag == "ul":
+            list_depth += -1 if match.group(1) else 1
+            continue
+        if list_depth != 0:
+            continue
+        if match.group(1):
+            if current is not None:
+                start, content_start, start_tag = current
+                items.append(
+                    HtmlListItem(
+                        start,
+                        content_start,
+                        match.start(),
+                        match.end(),
+                        start_tag,
+                        match.group(0),
+                    )
+                )
+                current = None
+        elif current is None:
+            current = (match.start(), match.end(), match.group(0))
+    return items
+
+
+def task_marker(content: str) -> re.Match[str] | None:
+    return TASK_MARKER_RE.match(content)
+
+
+def convert_task_lists(html: str) -> str:
+    next_task_id = 1
+
+    def render_task(body_source: str, marker: re.Match[str]) -> str:
+        nonlocal next_task_id
+        status = "complete" if marker.group(1).lower() == "x" else "incomplete"
+        task_id = next_task_id
+        next_task_id += 1
+        body = convert_fragment(body_source)
+        return "\n".join(
+            [
+                "<ac:task>",
+                f"<ac:task-id>{task_id}</ac:task-id>",
+                f"<ac:task-uuid>{uuid.uuid4()}</ac:task-uuid>",
+                f"<ac:task-status>{status}</ac:task-status>",
+                f"<ac:task-body>{body}</ac:task-body>",
+                "</ac:task>",
+            ]
+        )
+
+    def render_task_list(tasks: list[str]) -> str:
+        return "\n".join(["<ac:task-list>", *tasks, "</ac:task-list>"])
+
+    def render_list(
+        source: str,
+        opening: re.Match[str],
+        closing_start: int,
+        closing_end: int,
+    ) -> str:
+        inner = source[opening.end() : closing_start]
+        items = find_immediate_list_items(inner)
+        if not items:
+            return opening.group(0) + convert_fragment(inner) + source[closing_start:closing_end]
+
+        item_data: list[tuple[HtmlListItem, re.Match[str] | None, str]] = []
+        for item in items:
+            content = inner[item.content_start : item.content_end]
+            marker = task_marker(content)
+            body_source = content[marker.end() :] if marker else content
+            item_data.append((item, marker, body_source))
+
+        if all(marker is not None for _, marker, _ in item_data):
+            return render_task_list(
+                [render_task(body, marker) for _, marker, body in item_data if marker]
+            )
+
+        blocks: list[str] = []
+        index = 0
+        while index < len(item_data):
+            item, marker, body = item_data[index]
+            if marker is not None:
+                tasks: list[str] = []
+                while index < len(item_data) and item_data[index][1] is not None:
+                    _, task, task_body = item_data[index]
+                    assert task is not None
+                    tasks.append(render_task(task_body, task))
+                    index += 1
+                blocks.append(render_task_list(tasks))
+                continue
+
+            normal_items = [f"{item.start_tag}{convert_fragment(body)}{item.end_tag}"]
+            index += 1
+            while index < len(item_data) and item_data[index][1] is None:
+                normal_item, _, normal_body = item_data[index]
+                normal_items.append(
+                    f"{normal_item.start_tag}{convert_fragment(normal_body)}{normal_item.end_tag}"
+                )
+                index += 1
+            blocks.append(
+                opening.group(0) + "".join(normal_items) + source[closing_start:closing_end]
+            )
+
+        return "\n".join(blocks)
+
+    def convert_fragment(fragment: str) -> str:
+        parts: list[str] = []
+        cursor = 0
+        while True:
+            opening = HTML_UL_OPEN_RE.search(fragment, cursor)
+            if opening is None:
+                parts.append(fragment[cursor:])
+                return "".join(parts)
+            bounds = find_matching_list(fragment, opening)
+            if bounds is None:
+                parts.append(fragment[cursor:])
+                return "".join(parts)
+            closing_start, closing_end = bounds
+            parts.append(fragment[cursor : opening.start()])
+            parts.append(render_list(fragment, opening, closing_start, closing_end))
+            cursor = closing_end
+
+    return convert_fragment(html)
+
+
 def collect_local_image_attachments(
     html: str, base_dir: str, vault_root: Path, image_refs: dict[str, ImageRef]
 ) -> list[tuple[str, bytes]]:
@@ -492,6 +649,7 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> Con
 
     html = render_markdown(text)
     html = fix_xhtml(html)
+    html = convert_task_lists(html)
     html = restore_plantuml_macros(html, plantuml_replacements)
     html = convert_code_blocks(html)
 
