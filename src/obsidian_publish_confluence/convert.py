@@ -6,8 +6,8 @@ import json
 import math
 import os
 import re
-import textwrap
 import uuid
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import NamedTuple, TypedDict
 
@@ -26,6 +26,8 @@ class ImageRef(NamedTuple):
     attachment_name: str
     width: int | None
     data: bytes | None = None
+    related_attachment_name: str | None = None
+    related_data: bytes | None = None
 
 
 class HtmlListItem(NamedTuple):
@@ -35,6 +37,15 @@ class HtmlListItem(NamedTuple):
     end: int
     start_tag: str
     end_tag: str
+
+
+class CanvasTextPart(NamedTuple):
+    text: str
+    href: str | None
+    bold: bool = False
+    italic: bool = False
+    code: bool = False
+    pre: bool = False
 
 
 class ConvertResult(TypedDict):
@@ -136,6 +147,38 @@ CANVAS_COLORS = {
     "5": "#53dfdd",
     "6": "#a882ff",
 }
+CANVAS_BARE_URL_RE = re.compile(r'(?<![\[("\'])https?://[^\s<>()]+')
+MOUNTINFO_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
+
+
+def is_fuse_path(path: Path, mountinfo: str | None = None) -> bool:
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        except OSError:
+            return False
+
+    resolved = path.resolve()
+    for line in mountinfo.splitlines():
+        mount_fields, separator, filesystem_fields = line.partition(" - ")
+        if not separator:
+            continue
+        fields = mount_fields.split()
+        filesystem = filesystem_fields.split()
+        if len(fields) < 5 or not filesystem or not filesystem[0].startswith("fuse"):
+            continue
+        mountpoint = Path(MOUNTINFO_ESCAPE_RE.sub(lambda match: chr(int(match[1], 8)), fields[4]))
+        try:
+            resolved.relative_to(mountpoint)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def sync_if_fuse_path(path: str) -> None:
+    if is_fuse_path(Path(path)):
+        os.sync()
 
 
 def canvas_number(node: dict[str, object], key: str, default: float = 0) -> float:
@@ -171,20 +214,186 @@ def canvas_node_color(node: dict[str, object], default: str) -> str:
     return default
 
 
-def canvas_text_lines(text: str, width: float) -> list[str]:
+def prepare_canvas_markdown(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        url = match.group(0)
+        return f"[{url}]({url})"
+
+    return CANVAS_BARE_URL_RE.sub(replace, text)
+
+
+class CanvasMarkdownParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.lines: list[list[CanvasTextPart]] = [[]]
+        self.bold_depth = 0
+        self.italic_depth = 0
+        self.code_depth = 0
+        self.pre_depth = 0
+        self.href: str | None = None
+        self.list_stack: list[list[object]] = []
+
+    def line_break(self) -> None:
+        if self.lines[-1]:
+            self.lines.append([])
+
+    def append_text(self, text: str, styled: bool = True) -> None:
+        for index, line in enumerate(text.split("\n")):
+            if line:
+                self.lines[-1].append(
+                    CanvasTextPart(
+                        line,
+                        self.href,
+                        self.bold_depth > 0 if styled else False,
+                        self.italic_depth > 0 if styled else False,
+                        self.code_depth > 0 if styled else False,
+                        self.pre_depth > 0 if styled else False,
+                    )
+                )
+            elif self.pre_depth > 0:
+                self.lines[-1].append(CanvasTextPart("", None, pre=True))
+            if index < len(text.split("\n")) - 1:
+                self.line_break()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in {"p", "div", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.line_break()
+            if tag == "blockquote":
+                self.append_text("> ", styled=False)
+            if tag == "pre":
+                self.code_depth += 1
+                self.pre_depth += 1
+            if tag.startswith("h"):
+                self.bold_depth += 1
+        elif tag in {"strong", "b"}:
+            self.bold_depth += 1
+        elif tag in {"em", "i"}:
+            self.italic_depth += 1
+        elif tag == "code":
+            self.code_depth += 1
+        elif tag == "a":
+            self.href = dict(attrs).get("href")
+        elif tag in {"ul", "ol"}:
+            self.line_break()
+            self.list_stack.append([tag, 0])
+        elif tag == "li":
+            self.line_break()
+            if self.list_stack:
+                list_kind, item_number = self.list_stack[-1]
+                item_number = int(item_number) + 1
+                self.list_stack[-1][1] = item_number
+                prefix = "  " * (len(self.list_stack) - 1)
+                prefix += f"{item_number}. " if list_kind == "ol" else "• "
+                self.append_text(prefix, styled=False)
+        elif tag == "br":
+            self.line_break()
+        elif tag == "hr":
+            self.line_break()
+            self.append_text("----", styled=False)
+        elif tag == "img":
+            alt = dict(attrs).get("alt")
+            if alt:
+                self.append_text(alt, styled=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        self.append_text(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"strong", "b"}:
+            self.bold_depth = max(0, self.bold_depth - 1)
+        elif tag in {"em", "i"}:
+            self.italic_depth = max(0, self.italic_depth - 1)
+        elif tag == "code":
+            self.code_depth = max(0, self.code_depth - 1)
+        elif tag == "a":
+            self.href = None
+        elif tag == "pre":
+            self.code_depth = max(0, self.code_depth - 1)
+            self.pre_depth = max(0, self.pre_depth - 1)
+            self.line_break()
+        elif tag in {"ul", "ol"}:
+            if self.list_stack:
+                self.list_stack.pop()
+            self.line_break()
+        elif tag in {"p", "div", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            if tag.startswith("h"):
+                self.bold_depth = max(0, self.bold_depth - 1)
+            self.line_break()
+
+    def finish(self) -> list[list[CanvasTextPart]]:
+        while len(self.lines) > 1:
+            last_line = self.lines[-1]
+            if not last_line or all(part.pre and not part.text for part in last_line):
+                self.lines.pop()
+                continue
+            break
+        return self.lines
+
+
+def canvas_markdown_lines(text: str) -> list[list[CanvasTextPart]]:
+    rendered = markdown.markdown(
+        prepare_canvas_markdown(text),
+        extensions=["fenced_code", "nl2br", "sane_lists"],
+        output_format="html",
+    )
+    parser = CanvasMarkdownParser()
+    parser.feed(rendered)
+    parser.close()
+    return parser.finish()
+
+
+def canvas_text_lines(text: str, width: float) -> list[list[CanvasTextPart]]:
     max_chars = max(1, int(width / 8))
-    lines: list[str] = []
-    for paragraph in text.splitlines() or [""]:
-        lines.extend(
-            textwrap.wrap(
-                paragraph,
-                width=max_chars,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-            or [""]
-        )
+    lines: list[list[CanvasTextPart]] = []
+    for paragraph in canvas_markdown_lines(text):
+        if any(part.pre for part in paragraph):
+            lines.append(paragraph)
+            continue
+        current: list[CanvasTextPart] = []
+        current_length = 0
+        for part in paragraph:
+            for chunk in re.findall(r"\s+|\S+", part.text):
+                if chunk.strip() and current and current_length + len(chunk) > max_chars:
+                    lines.append(current)
+                    current = []
+                    current_length = 0
+                current.append(part._replace(text=chunk))
+                current_length += len(chunk)
+        lines.append(current or [CanvasTextPart("", None)])
     return lines
+
+
+def canvas_svg_inline_content(text: str) -> str:
+    lines = canvas_markdown_lines(text)
+    return canvas_svg_line_content(lines[0]) if lines else ""
+
+
+def canvas_svg_line_content(line: list[CanvasTextPart]) -> str:
+    content: list[str] = []
+    for part in line:
+        attributes: list[str] = []
+        if part.bold:
+            attributes.append('font-weight="bold"')
+        if part.italic:
+            attributes.append('font-style="italic"')
+        if part.code:
+            attributes.append('font-family="monospace"')
+        if part.pre:
+            attributes.append('font-size="14"')
+        if part.href:
+            attributes.append('text-decoration="underline"')
+        escaped_text = escape_xml(part.text)
+        if attributes:
+            escaped_text = f"<tspan {' '.join(attributes)}>{escaped_text}</tspan>"
+        if part.href:
+            escaped_text = f'<a href="{escape_xml_attribute(part.href)}">{escaped_text}</a>'
+        content.append(escaped_text)
+    return "".join(content)
 
 
 def canvas_node_geometry(
@@ -211,6 +420,48 @@ def canvas_edge_point(
     if side_name == "left":
         return x, y + height / 2
     return x + width / 2, y + height / 2
+
+
+def canvas_edge_direction(side: object, fallback: tuple[float, float]) -> tuple[float, float]:
+    directions = {
+        "top": (0.0, -1.0),
+        "right": (1.0, 0.0),
+        "bottom": (0.0, 1.0),
+        "left": (-1.0, 0.0),
+    }
+    return directions.get(str(side or "").lower(), fallback)
+
+
+def canvas_edge_path(
+    from_node: dict[str, object],
+    from_side: object,
+    to_node: dict[str, object],
+    to_side: object,
+) -> tuple[str, tuple[float, float], tuple[float, float]]:
+    start = canvas_edge_point(from_node, from_side, 0, 0)
+    end = canvas_edge_point(to_node, to_side, 0, 0)
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    distance = math.hypot(delta_x, delta_y)
+    fallback = (delta_x / distance, delta_y / distance) if distance else (0.0, 1.0)
+    control_distance = max(24.0, min(120.0, distance / 2))
+    from_direction = canvas_edge_direction(from_side, fallback)
+    to_direction = canvas_edge_direction(to_side, fallback)
+    control_1 = (
+        start[0] + from_direction[0] * control_distance,
+        start[1] + from_direction[1] * control_distance,
+    )
+    control_2 = (
+        end[0] + to_direction[0] * control_distance,
+        end[1] + to_direction[1] * control_distance,
+    )
+    path = (
+        f"M {format(start[0], '.15g')} {format(start[1], '.15g')} "
+        f"C {format(control_1[0], '.15g')} {format(control_1[1], '.15g')} "
+        f"{format(control_2[0], '.15g')} {format(control_2[1], '.15g')} "
+        f"{format(end[0], '.15g')} {format(end[1], '.15g')}"
+    )
+    return path, start, end
 
 
 def render_canvas_svg(data: object) -> bytes:
@@ -269,7 +520,7 @@ def render_canvas_svg(data: object) -> bytes:
             parts.append(
                 f'<text x="{format(x + 16, ".15g")}" y="{format(y - 10, ".15g")}" '
                 'font-family="Arial, sans-serif" font-size="18" font-weight="bold" '
-                f'fill="{color}">{escape_xml(label)}</text>'
+                f'fill="{color}">{canvas_svg_inline_content(label)}</text>'
             )
 
     for edge in edges:
@@ -277,12 +528,15 @@ def render_canvas_svg(data: object) -> bytes:
         to_node = node_by_id.get(str(edge.get("toNode")))
         if from_node is None or to_node is None:
             continue
-        start_x, start_y = canvas_edge_point(from_node, edge.get("fromSide"), 0, 0)
-        end_x, end_y = canvas_edge_point(to_node, edge.get("toSide"), 0, 0)
+        path, (start_x, start_y), (end_x, end_y) = canvas_edge_path(
+            from_node,
+            edge.get("fromSide"),
+            to_node,
+            edge.get("toSide"),
+        )
         parts.append(
-            f'<line x1="{format(start_x, ".15g")}" y1="{format(start_y, ".15g")}" '
-            f'x2="{format(end_x, ".15g")}" y2="{format(end_y, ".15g")}" '
-            'stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>'
+            f'<path d="{path}" fill="none" stroke="#64748b" stroke-width="2" '
+            'stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>'
         )
         label = edge.get("label")
         if isinstance(label, str) and label:
@@ -292,7 +546,7 @@ def render_canvas_svg(data: object) -> bytes:
                 f'<text x="{format(label_x, ".15g")}" y="{format(label_y, ".15g")}" '
                 'text-anchor="middle" font-family="Arial, sans-serif" font-size="14" '
                 'fill="#334155" paint-order="stroke" stroke="#ffffff" stroke-width="5">'
-                f"{escape_xml(label)}</text>"
+                f"{canvas_svg_inline_content(label)}</text>"
             )
 
     for node in nodes:
@@ -308,13 +562,42 @@ def render_canvas_svg(data: object) -> bytes:
         lines = canvas_text_lines(canvas_node_label(node), width - 24)
         line_height = 22
         first_y = y + height / 2 - (len(lines) - 1) * line_height / 2
-        for index, line in enumerate(lines):
+        code_line_indexes = [
+            index for index, line in enumerate(lines) if any(part.pre for part in line)
+        ]
+        if code_line_indexes:
+            code_start = code_line_indexes[0]
+            code_end = code_start
+            for index in code_line_indexes[1:]:
+                if index == code_end + 1:
+                    code_end = index
+                    continue
+                parts.append(
+                    f'<rect x="{format(x + 10, ".15g")}" '
+                    f'y="{format(first_y + code_start * line_height - 13, ".15g")}" '
+                    f'width="{format(max(0, width - 20), ".15g")}" '
+                    f'height="{format((code_end - code_start + 1) * line_height + 6, ".15g")}" '
+                    'rx="4" fill="#f1f5f9"/>'
+                )
+                code_start = code_end = index
             parts.append(
-                f'<text x="{format(x + width / 2, ".15g")}" '
+                f'<rect x="{format(x + 10, ".15g")}" '
+                f'y="{format(first_y + code_start * line_height - 13, ".15g")}" '
+                f'width="{format(max(0, width - 20), ".15g")}" '
+                f'height="{format((code_end - code_start + 1) * line_height + 6, ".15g")}" '
+                'rx="4" fill="#f1f5f9"/>'
+            )
+        for index, line in enumerate(lines):
+            code_line = any(part.pre for part in line)
+            text_x = x + 18 if code_line else x + width / 2
+            text_anchor = "start" if code_line else "middle"
+            preserve_space = ' xml:space="preserve"' if code_line else ""
+            parts.append(
+                f'<text x="{format(text_x, ".15g")}" '
                 f'y="{format(first_y + index * line_height, ".15g")}" '
-                'text-anchor="middle" dominant-baseline="middle" '
+                f'text-anchor="{text_anchor}" dominant-baseline="middle"{preserve_space} '
                 'font-family="Arial, sans-serif" font-size="16" fill="#1e293b">'
-                f"{escape_xml(line)}</text>"
+                f"{canvas_svg_line_content(line)}</text>"
             )
 
     parts.append("</svg>")
@@ -353,6 +636,8 @@ def convert_obsidian_canvas_embeds(
             canvas_attachment_name(md_path, path_text),
             int(suffix.strip()) if suffix.strip().isdigit() else None,
             render_canvas_file(resolved),
+            make_attachment_name(md_path, path_text),
+            resolved.read_bytes(),
         )
         return f"![]({escape_markdown_url(token)})"
 
@@ -390,6 +675,10 @@ def restore_plantuml_macros(html: str, replacements: dict[str, str]) -> str:
 
 def escape_xml(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def escape_xml_attribute(text: str) -> str:
+    return escape_xml(text).replace('"', "&quot;").replace("'", "&apos;")
 
 
 def convert_code_blocks(html: str) -> str:
@@ -578,6 +867,8 @@ def collect_local_image_attachments(
         image_ref = image_refs.get(src)
         if image_ref and image_ref.data is not None:
             attachments.append((image_ref.attachment_name, image_ref.data))
+            if image_ref.related_attachment_name and image_ref.related_data is not None:
+                attachments.append((image_ref.related_attachment_name, image_ref.related_data))
             return ""
         resolved = resolve_attachment_path(
             image_ref.source if image_ref else src, base_dir, vault_root
@@ -606,7 +897,17 @@ def convert_local_images_to_ac(
             if image_ref.width is not None:
                 attrs += f' ac:width="{image_ref.width}"'
             escaped_name = escape_xml(image_ref.attachment_name)
-            return f'<ac:image{attrs}><ri:attachment ri:filename="{escaped_name}"/></ac:image>'
+            image = f'<ac:image{attrs}><ri:attachment ri:filename="{escaped_name}"/></ac:image>'
+            if image_ref.related_attachment_name:
+                related_name = escape_xml(image_ref.related_attachment_name)
+                image += (
+                    "<br/><ac:link>"
+                    f'<ri:attachment ri:filename="{related_name}"/>'
+                    "<ac:plain-text-link-body><![CDATA[📎 Оригинальный .canvas]]>"
+                    "</ac:plain-text-link-body>"
+                    "</ac:link>"
+                )
+            return image
         resolved = resolve_attachment_path(
             image_ref.source if image_ref else src, base_dir, vault_root
         )
@@ -636,6 +937,7 @@ def remove_frontmatter(text: str) -> str:
 
 def collect_attachments(md_path: str, plantuml_server: str | None = None) -> ConvertResult:
     md_path = os.path.abspath(md_path)
+    sync_if_fuse_path(md_path)
     if not os.path.isfile(md_path):
         raise FileNotFoundError(f"File not found: {md_path}")
 

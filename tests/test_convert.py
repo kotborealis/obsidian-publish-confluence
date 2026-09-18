@@ -4,15 +4,36 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from obsidian_publish_confluence.convert import (
     ConvertResult,
     collect_attachments,
+    is_fuse_path,
     render_canvas_svg,
 )
 
 
 class ConvertTests(unittest.TestCase):
+    def test_fuse_path_is_detected_from_mountinfo(self) -> None:
+        mountinfo = "42 1 0:1 / /home/evgeny/writing rw - fuse.rclone writing: rw\n"
+
+        self.assertTrue(is_fuse_path(Path("/home/evgeny/writing/note.md"), mountinfo))
+        self.assertFalse(is_fuse_path(Path("/home/evgeny/notes/note.md"), mountinfo))
+
+    def test_fuse_path_is_synced_before_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("# hi\n", encoding="utf-8")
+
+            with (
+                patch("obsidian_publish_confluence.convert.is_fuse_path", return_value=True),
+                patch("obsidian_publish_confluence.convert.os.sync") as sync,
+            ):
+                collect_attachments(str(note), None)
+
+            sync.assert_called_once_with()
+
     def test_fenced_code_block_becomes_confluence_code_macro(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
@@ -177,18 +198,30 @@ class ConvertTests(unittest.TestCase):
 
             result: ConvertResult = collect_attachments(str(note), None)
 
-            self.assertEqual(len(result["attachments"]), 1)
-            attachment = result["attachments"][0]
-            self.assertTrue(attachment["name"].endswith("-board.svg"))
+            self.assertEqual(len(result["attachments"]), 2)
+            attachment = next(
+                attachment
+                for attachment in result["attachments"]
+                if attachment["name"].endswith("-board.svg")
+            )
+            original = next(
+                attachment
+                for attachment in result["attachments"]
+                if attachment["name"].endswith("-board.canvas")
+            )
             self.assertIn('ri:attachment ri:filename="', result["body"])
             self.assertIn(attachment["name"], result["body"])
+            self.assertIn(original["name"], result["body"])
+            self.assertIn("<![CDATA[📎 Оригинальный .canvas]]>", result["body"])
             self.assertIn('ac:width="640"', result["body"])
+            self.assertEqual(base64.b64decode(original["data_b64"]), canvas.read_bytes())
 
             svg = base64.b64decode(attachment["data_b64"]).decode("utf-8")
-            self.assertIn('viewBox="-50 -20 340 100"', svg)
+            self.assertIn('viewBox="-50 -20 380 130"', svg)
             self.assertIn('x="-10" y="20" width="100" height="50"', svg)
             self.assertIn('x="190" y="20" width="100" height="50"', svg)
-            self.assertIn('x1="90" y1="45" x2="190" y2="45"', svg)
+            self.assertIn('d="M 90 45 C 140 45 140 45 190 45"', svg)
+            self.assertIn('stroke-linecap="round"', svg)
             self.assertIn(">next</text>", svg)
 
     def test_missing_canvas_embed_fails_clearly(self) -> None:
@@ -228,6 +261,85 @@ class ConvertTests(unittest.TestCase):
 
         self.assertIn('<text x="16" y="-10"', svg)
         self.assertIn('<rect x="0" y="0" width="100" height="50"', svg)
+
+    def test_canvas_markdown_link_becomes_svg_link(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "node",
+                        "type": "text",
+                        "text": "[abc](https://foo.bar)",
+                        "x": 0,
+                        "y": 0,
+                        "width": 200,
+                        "height": 60,
+                    }
+                ],
+                "edges": [],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('href="https://foo.bar"', svg)
+        self.assertIn(">abc</tspan></a>", svg)
+        self.assertNotIn("[abc](https://foo.bar)", svg)
+
+    def test_canvas_renders_rich_markdown(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "node",
+                        "type": "text",
+                        "text": (
+                            "See https://foo.bar **bold** *italic* `code`\n\n- one\n    - nested"
+                        ),
+                        "x": 0,
+                        "y": 0,
+                        "width": 300,
+                        "height": 180,
+                    }
+                ],
+                "edges": [],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('href="https://foo.bar"', svg)
+        self.assertIn(">https://foo.bar</tspan></a>", svg)
+        self.assertIn('font-weight="bold"', svg)
+        self.assertIn('font-style="italic"', svg)
+        self.assertIn('font-family="monospace"', svg)
+        self.assertIn(">• one</text>", svg)
+        self.assertIn(">  • nested</text>", svg)
+
+    def test_canvas_fenced_code_preserves_lines_and_uses_code_block_style(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "node",
+                        "type": "text",
+                        "text": "```python\nfor x in range(3):\n    print(x)\n```",
+                        "x": 0,
+                        "y": 0,
+                        "width": 300,
+                        "height": 180,
+                    }
+                ],
+                "edges": [],
+            }
+        ).decode("utf-8")
+
+        self.assertNotIn("```", svg)
+        self.assertEqual(svg.count('<text x="18"'), 2)
+        self.assertIn('fill="#f1f5f9"', svg)
+        self.assertIn('font-family="monospace"', svg)
+        self.assertIn('font-size="14"', svg)
+        self.assertIn('text x="18"', svg)
+        self.assertIn('text-anchor="start"', svg)
+        self.assertIn('xml:space="preserve"', svg)
+        self.assertIn(">for x in range(3):</tspan>", svg)
+        self.assertIn(">    print(x)</tspan>", svg)
 
 
 if __name__ == "__main__":
