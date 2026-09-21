@@ -262,6 +262,42 @@ class ConvertTests(unittest.TestCase):
         self.assertIn('<text x="16" y="-10"', svg)
         self.assertIn('<rect x="0" y="0" width="100" height="50"', svg)
 
+    def test_canvas_viewbox_includes_curved_edge_control_points(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "text",
+                        "text": "A",
+                        "x": 100,
+                        "y": 0,
+                        "width": 50,
+                        "height": 50,
+                    },
+                    {
+                        "id": "b",
+                        "type": "text",
+                        "text": "B",
+                        "x": 100,
+                        "y": 300,
+                        "width": 50,
+                        "height": 50,
+                    },
+                ],
+                "edges": [
+                    {
+                        "fromNode": "a",
+                        "fromSide": "top",
+                        "toNode": "b",
+                        "toSide": "top",
+                    }
+                ],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('viewBox="60 -160 130 550"', svg)
+
     def test_canvas_markdown_link_becomes_svg_link(self) -> None:
         svg = render_canvas_svg(
             {

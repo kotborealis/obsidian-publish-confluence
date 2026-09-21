@@ -432,12 +432,17 @@ def canvas_edge_direction(side: object, fallback: tuple[float, float]) -> tuple[
     return directions.get(str(side or "").lower(), fallback)
 
 
-def canvas_edge_path(
+def canvas_edge_geometry(
     from_node: dict[str, object],
     from_side: object,
     to_node: dict[str, object],
     to_side: object,
-) -> tuple[str, tuple[float, float], tuple[float, float]]:
+) -> tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]:
     start = canvas_edge_point(from_node, from_side, 0, 0)
     end = canvas_edge_point(to_node, to_side, 0, 0)
     delta_x = end[0] - start[0]
@@ -455,6 +460,16 @@ def canvas_edge_path(
         end[0] + to_direction[0] * control_distance,
         end[1] + to_direction[1] * control_distance,
     )
+    return start, control_1, control_2, end
+
+
+def canvas_edge_path(
+    from_node: dict[str, object],
+    from_side: object,
+    to_node: dict[str, object],
+    to_side: object,
+) -> tuple[str, tuple[float, float], tuple[float, float]]:
+    start, control_1, control_2, end = canvas_edge_geometry(from_node, from_side, to_node, to_side)
     path = (
         f"M {format(start[0], '.15g')} {format(start[1], '.15g')} "
         f"C {format(control_1[0], '.15g')} {format(control_1[1], '.15g')} "
@@ -484,12 +499,26 @@ def render_canvas_svg(data: object) -> bytes:
     else:
         min_x = min_y = max_x = max_y = 0
 
+    node_by_id = {str(node["id"]): node for node in nodes if isinstance(node.get("id"), str)}
+    edge_points: list[tuple[float, float]] = []
+    for edge in edges:
+        from_node = node_by_id.get(str(edge.get("fromNode")))
+        to_node = node_by_id.get(str(edge.get("toNode")))
+        if from_node is not None and to_node is not None:
+            edge_points.extend(
+                canvas_edge_geometry(from_node, edge.get("fromSide"), to_node, edge.get("toSide"))
+            )
+    if edge_points:
+        min_x = min(min_x, *(point[0] for point in edge_points))
+        min_y = min(min_y, *(point[1] for point in edge_points))
+        max_x = max(max_x, *(point[0] for point in edge_points))
+        max_y = max(max_y, *(point[1] for point in edge_points))
+
     margin = 40
     svg_width = max(1, max_x - min_x + margin * 2)
     svg_height = max(1, max_y - min_y + margin * 2)
     view_min_x = min_x - margin
     view_min_y = min_y - margin
-    node_by_id = {str(node["id"]): node for node in nodes if isinstance(node.get("id"), str)}
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<svg xmlns="http://www.w3.org/2000/svg" '
