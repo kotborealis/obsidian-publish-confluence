@@ -739,15 +739,15 @@ def fix_xhtml(html: str) -> str:
     return html
 
 
-HTML_LIST_TAG_RE = re.compile(r"<(/?)(ul|li)\b[^>]*>", re.IGNORECASE)
-HTML_UL_OPEN_RE = re.compile(r"<ul\b[^>]*>", re.IGNORECASE)
+HTML_LIST_TAG_RE = re.compile(r"<(/?)(ul|ol|li)\b[^>]*>", re.IGNORECASE)
+HTML_LIST_OPEN_RE = re.compile(r"<(?:ul|ol)\b[^>]*>", re.IGNORECASE)
 TASK_MARKER_RE = re.compile(r"^\s*\[([ xX])\](?:\s+|$)")
 
 
 def find_matching_list(html: str, opening: re.Match[str]) -> tuple[int, int] | None:
     depth = 1
     for match in HTML_LIST_TAG_RE.finditer(html, opening.end()):
-        if match.group(2).lower() != "ul":
+        if match.group(2).lower() == "li":
             continue
         if match.group(1):
             depth -= 1
@@ -765,7 +765,7 @@ def find_immediate_list_items(inner: str) -> list[HtmlListItem]:
 
     for match in HTML_LIST_TAG_RE.finditer(inner):
         tag = match.group(2).lower()
-        if tag == "ul":
+        if tag in {"ul", "ol"}:
             list_depth += -1 if match.group(1) else 1
             continue
         if list_depth != 0:
@@ -871,7 +871,7 @@ def convert_task_lists(html: str) -> str:
         parts: list[str] = []
         cursor = 0
         while True:
-            opening = HTML_UL_OPEN_RE.search(fragment, cursor)
+            opening = HTML_LIST_OPEN_RE.search(fragment, cursor)
             if opening is None:
                 parts.append(fragment[cursor:])
                 return "".join(parts)

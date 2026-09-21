@@ -72,6 +72,18 @@ class ConvertTests(unittest.TestCase):
             self.assertIn("<ac:task-body>done</ac:task-body>", body)
             self.assertNotIn("<ac:task-body>[", body)
 
+    def test_ordered_checkbox_list_becomes_confluence_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("1. [ ] first\n2. [x] second\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            body = result["body"]
+            self.assertEqual(body.count("<ac:task>"), 2)
+            self.assertIn("<ac:task-body>first</ac:task-body>", body)
+            self.assertIn("<ac:task-body>second</ac:task-body>", body)
+
     def test_nested_checkbox_lists_become_nested_confluence_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
