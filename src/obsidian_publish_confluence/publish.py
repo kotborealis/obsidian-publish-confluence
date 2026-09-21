@@ -113,11 +113,16 @@ def parse_json_response(response_text: str) -> JsonDict:
     if not response_text.strip():
         die("Confluence API returned an empty response")
     try:
-        parsed = cast(JsonDict, json.loads(response_text))
+        parsed_value = json.loads(response_text)
     except json.JSONDecodeError:
         snippet = response_text[:500].strip()
         die(f"Confluence API returned non-JSON response: {snippet or '<empty>'}")
+    if not isinstance(parsed_value, dict):
+        die("Confluence API returned JSON that is not an object")
+    parsed = cast(JsonDict, parsed_value)
     status_code = parsed.get("statusCode")
+    if "statusCode" in parsed and not isinstance(status_code, int):
+        raise ConfluenceApiError("Confluence API returned an invalid status code")
     if "statusCode" in parsed and status_code != 200:
         error_type = PageNotFoundError if status_code == 404 else ConfluenceApiError
         raise error_type(summarize_confluence_error(parsed), status_code)
@@ -178,13 +183,15 @@ def fetch_page_details(config: Config, page_id: str) -> tuple[int, str]:
             f"Mapped page ID {page_id} no longer exists in Confluence", 404
         ) from exc
     version = response.get("version")
-    if not isinstance(version, dict) or "number" not in version:
-        die(f"Confluence API response for page {page_id} does not include version info")
+    version_number = numeric_id(version.get("number")) if isinstance(version, dict) else None
+    if version_number is None:
+        raise ConfluenceApiError(
+            f"Confluence API response for page {page_id} does not include valid version info"
+        )
     title = response.get("title")
     if not isinstance(title, str) or not title:
         die(f"Confluence API response for page {page_id} does not include title info")
-    version_dict = cast(JsonDict, version)
-    return int(version_dict["number"]), cast(str, title)
+    return int(version_number), title
 
 
 def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str | None:
@@ -194,8 +201,12 @@ def find_attachment_id_by_name(config: Config, page_id: str, name: str) -> str |
     )
     results = response.get("results", [])
     if results:
-        first = cast(JsonDict, results[0])
-        return str(first["id"])
+        if not isinstance(results, list) or not isinstance(results[0], dict):
+            raise ConfluenceApiError("Confluence API returned invalid attachment results")
+        attachment_id = numeric_id(results[0].get("id"))
+        if attachment_id is None:
+            raise ConfluenceApiError("Confluence API returned an invalid attachment ID")
+        return attachment_id
     return None
 
 
@@ -208,6 +219,9 @@ def delete_attachment_by_name(config: Config, page_id: str, name: str) -> bool:
 
 
 def create_page(config: Config, title: str, body: str, parent_id: str, space_key: str) -> str:
+    parent_id_value = numeric_id(parent_id)
+    if parent_id_value is None:
+        raise ConfluenceApiError(f"Invalid parent page ID: {parent_id}")
     response = confluence_post(
         config,
         "/content",
@@ -215,13 +229,14 @@ def create_page(config: Config, title: str, body: str, parent_id: str, space_key
             "type": "page",
             "title": title,
             "space": {"key": space_key},
-            "ancestors": [{"id": int(parent_id)}],
+            "ancestors": [{"id": int(parent_id_value)}],
             "body": {"storage": {"value": body, "representation": "storage"}},
         },
     )
-    if "id" not in response:
-        raise ConfluenceApiError(summarize_confluence_error(response))
-    return str(response["id"])
+    page_id = numeric_id(response.get("id"))
+    if page_id is None:
+        raise ConfluenceApiError("Confluence API response does not include a valid page ID")
+    return page_id
 
 
 def update_page(config: Config, page_id: str, title: str, body: str, prev_version: int) -> int:
@@ -236,9 +251,22 @@ def update_page(config: Config, page_id: str, title: str, body: str, prev_versio
             "body": {"storage": {"value": body, "representation": "storage"}},
         },
     )
-    if "version" not in response:
-        raise ConfluenceApiError(summarize_confluence_error(response))
-    return int(response["version"]["number"])
+    version = response.get("version")
+    version_number = numeric_id(version.get("number")) if isinstance(version, dict) else None
+    if version_number is None:
+        raise ConfluenceApiError("Confluence API response does not include a valid version")
+    return int(version_number)
+
+
+def numeric_id(value: object) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value.isdigit() else None
 
 
 def upload_attachments(config: Config, page_id: str, attachments: list[AttachmentJson]) -> None:
@@ -298,7 +326,10 @@ def page_id_from_url(page_url: str) -> str:
     parsed = urllib.parse.urlparse(page_url)
     query_page_id = urllib.parse.parse_qs(parsed.query).get("pageId")
     if query_page_id and query_page_id[0]:
-        return query_page_id[0]
+        page_id = numeric_id(query_page_id[0])
+        if page_id is not None:
+            return page_id
+        die(f"Invalid Confluence page ID in URL: {page_url}")
     path_match = CONFLUENCE_URL_RE.search(parsed.path)
     if path_match:
         return path_match.group(1)
@@ -318,8 +349,15 @@ def read_frontmatter_page_url(md_path: str) -> str | None:
     if not match:
         return None
     for line in match.group("body").splitlines():
-        if line.strip().startswith("confluence_url"):
-            return line.split(":", 1)[1].strip().strip("'\"")
+        stripped = line.strip()
+        url_match = re.fullmatch(r"confluence_url\s*:\s*(.*?)\s*", stripped)
+        if url_match:
+            value = url_match.group(1).strip().strip("'\"")
+            if not value:
+                die("Frontmatter confluence_url cannot be empty")
+            return value
+        if stripped.startswith("confluence_url"):
+            die("Invalid confluence_url in frontmatter")
     return None
 
 

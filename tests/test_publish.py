@@ -10,8 +10,12 @@ from obsidian_publish_confluence.publish import (
     Config,
     ConfluenceApiError,
     PageNotFoundError,
+    create_page,
+    page_id_from_url,
     parse_json_response,
     publish_markdown,
+    read_frontmatter_page_url,
+    update_page,
     upload_attachments,
 )
 
@@ -26,6 +30,36 @@ class PublishTests(unittest.TestCase):
     def test_parse_json_response_marks_missing_pages(self) -> None:
         with self.assertRaises(PageNotFoundError):
             parse_json_response('{"statusCode":404,"message":"missing"}')
+
+    def test_parse_json_response_rejects_non_object(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "not an object"):
+            parse_json_response("[]")
+
+    def test_page_id_url_must_contain_numeric_id(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Invalid Confluence page ID"):
+            page_id_from_url("https://confluence.example.com/pages/viewpage.action?pageId=abc")
+
+    def test_create_page_rejects_invalid_response_id(self) -> None:
+        config = Config("https://confluence.example.com", "DOCS", "123")
+        with patch("obsidian_publish_confluence.publish.confluence_post", return_value={"id": []}):
+            with self.assertRaisesRegex(ConfluenceApiError, "valid page ID"):
+                create_page(config, "title", "body", "123", "DOCS")
+
+    def test_update_page_rejects_invalid_response_version(self) -> None:
+        config = Config("https://confluence.example.com", "DOCS", "123")
+        with patch(
+            "obsidian_publish_confluence.publish.confluence_put", return_value={"version": {}}
+        ):
+            with self.assertRaisesRegex(ConfluenceApiError, "valid version"):
+                update_page(config, "123", "title", "body", 1)
+
+    def test_frontmatter_page_url_key_must_be_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("---\nconfluence_url\n---\n# hi\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Invalid confluence_url"):
+                read_frontmatter_page_url(str(note))
 
     def test_non_404_page_error_does_not_create_duplicate_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
