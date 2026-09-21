@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from base64 import b64encode
 from pathlib import Path
 from unittest.mock import patch
 
 from obsidian_publish_confluence.publish import (
     Config,
     ConfluenceApiError,
+    PageNotFoundError,
     parse_json_response,
     publish_markdown,
+    upload_attachments,
 )
 
 
@@ -19,6 +22,57 @@ class PublishTests(unittest.TestCase):
             parse_json_response('{"statusCode":400,"message":"boom","reason":"Bad Request"}')
         self.assertIn("HTTP 400", str(ctx.exception))
         self.assertIn("boom", str(ctx.exception))
+
+    def test_parse_json_response_marks_missing_pages(self) -> None:
+        with self.assertRaises(PageNotFoundError):
+            parse_json_response('{"statusCode":404,"message":"missing"}')
+
+    def test_non_404_page_error_does_not_create_duplicate_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text(
+                '---\nconfluence_url: "https://confluence.example.com/spaces/DOCS/pages/999"\n'
+                "---\n# hi\n",
+                encoding="utf-8",
+            )
+            config = Config(
+                base_url="https://confluence.example.com",
+                space="DOCS",
+                parent_id="123",
+            )
+
+            with (
+                patch("obsidian_publish_confluence.publish.check_prereqs"),
+                patch(
+                    "obsidian_publish_confluence.publish.fetch_page_details",
+                    side_effect=ConfluenceApiError("HTTP 500; unavailable", 500),
+                ),
+                patch("obsidian_publish_confluence.publish.create_page") as create_page,
+            ):
+                with self.assertRaises(ConfluenceApiError):
+                    publish_markdown(config, str(note))
+
+            create_page.assert_not_called()
+
+    def test_attachment_upload_failure_is_fatal_and_includes_response(self) -> None:
+        config = Config(
+            base_url="https://confluence.example.com",
+            space="DOCS",
+            parent_id="123",
+        )
+        attachment = {
+            "name": "image.png",
+            "data_b64": b64encode(b"image").decode("ascii"),
+        }
+
+        with patch(
+            "obsidian_publish_confluence.publish.subprocess.run",
+            return_value=type(
+                "Completed", (), {"stdout": '{"message":"denied"}\n500', "stderr": ""}
+            )(),
+        ):
+            with self.assertRaisesRegex(ConfluenceApiError, "denied"):
+                upload_attachments(config, "123", [attachment])
 
     def test_dry_run_does_not_call_prereqs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

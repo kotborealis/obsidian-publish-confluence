@@ -22,6 +22,12 @@ JsonDict = dict[str, Any]
 
 
 class ConfluenceApiError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PageNotFoundError(ConfluenceApiError):
     pass
 
 
@@ -111,8 +117,10 @@ def parse_json_response(response_text: str) -> JsonDict:
     except json.JSONDecodeError:
         snippet = response_text[:500].strip()
         die(f"Confluence API returned non-JSON response: {snippet or '<empty>'}")
-    if "statusCode" in parsed and parsed.get("statusCode") != 200:
-        raise ConfluenceApiError(summarize_confluence_error(parsed))
+    status_code = parsed.get("statusCode")
+    if "statusCode" in parsed and status_code != 200:
+        error_type = PageNotFoundError if status_code == 404 else ConfluenceApiError
+        raise error_type(summarize_confluence_error(parsed), status_code)
     return parsed
     raise AssertionError("unreachable")
 
@@ -165,10 +173,10 @@ def confluence_delete(config: Config, path: str) -> JsonDict | None:
 def fetch_page_details(config: Config, page_id: str) -> tuple[int, str]:
     try:
         response = confluence_get(config, f"/content/{page_id}?expand=version")
-    except ConfluenceApiError as exc:
-        if "HTTP 404" in str(exc):
-            die(f"Mapped page ID {page_id} no longer exists in Confluence")
-        raise
+    except PageNotFoundError as exc:
+        raise PageNotFoundError(
+            f"Mapped page ID {page_id} no longer exists in Confluence", 404
+        ) from exc
     version = response.get("version")
     if not isinstance(version, dict) or "number" not in version:
         die(f"Confluence API response for page {page_id} does not include version info")
@@ -243,62 +251,46 @@ def upload_attachments(config: Config, page_id: str, attachments: list[Attachmen
             name = attachment["name"]
             path = Path(work_dir) / name
             path.write_bytes(base64.b64decode(attachment["data_b64"]))
-            completed = subprocess.run(
-                [
-                    "curl",
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "--negotiate",
-                    "-u",
-                    ":",
-                    "-H",
-                    "X-Atlassian-Token: no-check",
-                    "-F",
-                    f"file=@{path};filename={name}",
-                    f"{config.api_url}/content/{page_id}/child/attachment",
-                ],
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            code = completed.stdout.strip()
+
+            def upload(path: Path = path, name: str = name) -> tuple[str, str]:
+                completed = subprocess.run(
+                    [
+                        "curl",
+                        "-s",
+                        "-w",
+                        "\n%{http_code}",
+                        "--negotiate",
+                        "-u",
+                        ":",
+                        "-H",
+                        "X-Atlassian-Token: no-check",
+                        "-F",
+                        f"file=@{path};filename={name}",
+                        f"{config.api_url}/content/{page_id}/child/attachment",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                body, separator, code = completed.stdout.rstrip().rpartition("\n")
+                if not separator:
+                    body = completed.stderr.strip()
+                return code, body.strip()
+
+            code, error_body = upload()
             if code != "200":
-                error_body = completed.stderr.strip()
                 if code == "400" and delete_attachment_by_name(config, page_id, name):
                     info(f"Attachment {name} already exists, replacing it...")
-                    retry = subprocess.run(
-                        [
-                            "curl",
-                            "-s",
-                            "-o",
-                            "/dev/null",
-                            "-w",
-                            "%{http_code}",
-                            "--negotiate",
-                            "-u",
-                            ":",
-                            "-H",
-                            "X-Atlassian-Token: no-check",
-                            "-F",
-                            f"file=@{path};filename={name}",
-                            f"{config.api_url}/content/{page_id}/child/attachment",
-                        ],
-                        text=True,
-                        capture_output=True,
-                        check=True,
-                    )
-                    retry_code = retry.stdout.strip()
+                    retry_code, error_body = upload()
                     if retry_code == "200":
                         info(f"Uploaded: {name}")
                         continue
-                    error_body = retry.stderr.strip()
                     code = retry_code
-                detail = f"; {error_body}" if error_body else ""
-                info(f"WARNING: Failed to upload {name} (HTTP {code}{detail})")
-                continue
+                detail = f": {error_body}" if error_body else ""
+                raise ConfluenceApiError(
+                    f"Failed to upload attachment {name} (HTTP {code}){detail}",
+                    int(code) if code.isdigit() else None,
+                )
             info(f"Uploaded: {name}")
 
 
@@ -396,7 +388,7 @@ def publish_markdown(
         info(f"Found existing page ID: {page_id} (updating...)")
         try:
             prev_version, existing_title = fetch_page_details(config, page_id)
-        except RuntimeError as exc:
+        except PageNotFoundError as exc:
             info(f"Stored page ID {page_id} is stale ({exc}); creating a new page...")
             page_id = None
             page_url = None
