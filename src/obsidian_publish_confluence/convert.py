@@ -101,7 +101,10 @@ def resolve_attachment_path(src: str, base_dir: str, vault_root: Path) -> Path |
     for resolved in candidates:
         if resolved.is_file():
             return resolved
-    return None
+
+    pattern = normalized if len(Path(normalized).parts) > 1 else Path(normalized).name
+    matches = sorted(path for path in vault_root.rglob(pattern) if path.is_file())
+    return matches[0] if matches else None
 
 
 def resolve_canvas_path(src: str, base_dir: str, vault_root: Path) -> Path | None:
@@ -888,9 +891,19 @@ def convert_task_lists(html: str) -> str:
 
 
 def collect_local_image_attachments(
-    html: str, base_dir: str, vault_root: Path, image_refs: dict[str, ImageRef]
+    html: str,
+    md_path: str,
+    base_dir: str,
+    vault_root: Path,
+    image_refs: dict[str, ImageRef],
 ) -> list[tuple[str, bytes]]:
     attachments: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+
+    def add_attachment(name: str, data: bytes) -> None:
+        if name not in seen:
+            seen.add(name)
+            attachments.append((name, data))
 
     def collect(match: re.Match[str]) -> str:
         src = match.group(1)
@@ -899,16 +912,20 @@ def collect_local_image_attachments(
         src = src.replace("%20", " ")
         image_ref = image_refs.get(src)
         if image_ref and image_ref.data is not None:
-            attachments.append((image_ref.attachment_name, image_ref.data))
+            add_attachment(image_ref.attachment_name, image_ref.data)
             if image_ref.related_attachment_name and image_ref.related_data is not None:
-                attachments.append((image_ref.related_attachment_name, image_ref.related_data))
+                add_attachment(image_ref.related_attachment_name, image_ref.related_data)
             return ""
         resolved = resolve_attachment_path(
             image_ref.source if image_ref else src, base_dir, vault_root
         )
         if resolved is not None:
-            attachment_name = image_ref.attachment_name if image_ref else resolved.name
-            attachments.append((attachment_name, resolved.read_bytes()))
+            attachment_name = (
+                image_ref.attachment_name
+                if image_ref
+                else make_attachment_name(md_path, str(resolved))
+            )
+            add_attachment(attachment_name, resolved.read_bytes())
         return ""
 
     re.sub(r'<img\s+[^>]*src="([^"]+)"', collect, html)
@@ -916,7 +933,11 @@ def collect_local_image_attachments(
 
 
 def convert_local_images_to_ac(
-    html: str, base_dir: str, vault_root: Path, image_refs: dict[str, ImageRef]
+    html: str,
+    md_path: str,
+    base_dir: str,
+    vault_root: Path,
+    image_refs: dict[str, ImageRef],
 ) -> str:
     def replace(match: re.Match[str]) -> str:
         full_tag = match.group(0)
@@ -949,7 +970,9 @@ def convert_local_images_to_ac(
         attrs = ' ac:height="auto"'
         if image_ref and image_ref.width is not None:
             attrs += f' ac:width="{image_ref.width}"'
-        attachment_name = image_ref.attachment_name if image_ref else resolved.name
+        attachment_name = (
+            image_ref.attachment_name if image_ref else make_attachment_name(md_path, str(resolved))
+        )
         escaped_name = escape_xml(attachment_name)
         return f'<ac:image{attrs}><ri:attachment ri:filename="{escaped_name}"/></ac:image>'
 
@@ -988,8 +1011,10 @@ def collect_attachments(md_path: str, plantuml_server: str | None = None) -> Con
     html = restore_plantuml_macros(html, plantuml_replacements)
     html = convert_code_blocks(html)
 
-    image_attachments = collect_local_image_attachments(html, base_dir, vault_root, image_refs)
-    html = convert_local_images_to_ac(html, base_dir, vault_root, image_refs)
+    image_attachments = collect_local_image_attachments(
+        html, md_path, base_dir, vault_root, image_refs
+    )
+    html = convert_local_images_to_ac(html, md_path, base_dir, vault_root, image_refs)
 
     attachments: list[AttachmentJson] = [
         {"name": name, "data_b64": base64.b64encode(data).decode("ascii")}

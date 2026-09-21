@@ -207,6 +207,40 @@ class ConvertTests(unittest.TestCase):
             for name in attachment_names:
                 self.assertIn(name, result["body"])
 
+    def test_image_embed_is_found_recursively_in_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            (vault / ".obsidian").mkdir()
+            note = vault / "notes" / "note.md"
+            note.parent.mkdir()
+            image = vault / "assets" / "image.png"
+            image.parent.mkdir()
+            image.write_bytes(b"png")
+            note.write_text("![[image.png]]\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertEqual(len(result["attachments"]), 1)
+            self.assertTrue(result["attachments"][0]["name"].endswith("-image.png"))
+
+    def test_markdown_images_are_namespaced_by_resolved_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            (vault / ".obsidian").mkdir()
+            note = vault / "note.md"
+            for directory, data in (("one", b"one"), ("two", b"two")):
+                image = vault / directory / "logo.png"
+                image.parent.mkdir()
+                image.write_bytes(data)
+            note.write_text("![one](one/logo.png)\n![two](two/logo.png)\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            names = [attachment["name"] for attachment in result["attachments"]]
+            self.assertEqual(len(names), 2)
+            self.assertEqual(len(set(names)), 2)
+            self.assertTrue(all(name.startswith("opc-") for name in names))
+
     def test_canvas_embed_becomes_svg_attachment_with_original_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             note = Path(tmp) / "note.md"
