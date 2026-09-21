@@ -686,7 +686,7 @@ def extract_plantuml_macros(text: str) -> tuple[str, dict[str, str]]:
             f'<ac:structured-macro ac:name="plantuml" '
             f'ac:schema-version="1" ac:macro-id="{macro_id}">'
             '<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>'
-            f"<ac:plain-text-body><![CDATA[{code}\n]]></ac:plain-text-body>"
+            f"<ac:plain-text-body><![CDATA[{escape_cdata(code)}\n]]></ac:plain-text-body>"
             "</ac:structured-macro>"
         )
         return f"\n\n{token}\n\n"
@@ -706,6 +706,10 @@ def escape_xml(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def escape_cdata(text: str) -> str:
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
 def escape_xml_attribute(text: str) -> str:
     return escape_xml(text).replace('"', "&quot;").replace("'", "&apos;")
 
@@ -717,7 +721,7 @@ def convert_code_blocks(html: str) -> str:
         parts = ['<ac:structured-macro ac:name="code" ac:schema-version="1">']
         if lang:
             parts.append(f'<ac:parameter ac:name="language">{escape_xml(lang)}</ac:parameter>')
-        parts.append(f"<ac:plain-text-body><![CDATA[{code}]]></ac:plain-text-body>")
+        parts.append(f"<ac:plain-text-body><![CDATA[{escape_cdata(code)}]]></ac:plain-text-body>")
         parts.append("</ac:structured-macro>")
         return "\n".join(parts)
 

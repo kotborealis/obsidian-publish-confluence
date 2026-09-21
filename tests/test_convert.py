@@ -9,6 +9,7 @@ from unittest.mock import patch
 from obsidian_publish_confluence.convert import (
     ConvertResult,
     collect_attachments,
+    convert_code_blocks,
     is_fuse_path,
     render_canvas_svg,
 )
@@ -48,6 +49,11 @@ class ConvertTests(unittest.TestCase):
             self.assertIn('<ac:parameter ac:name="language">yaml</ac:parameter>', result["body"])
             self.assertIn("providesServices:", result["body"])
             self.assertNotIn("<pre", result["body"])
+
+    def test_code_cdata_terminator_is_escaped(self) -> None:
+        result = convert_code_blocks("<pre><code>before]]>after</code></pre>")
+
+        self.assertIn("before]]]]><![CDATA[>after", result)
 
     def test_checkbox_list_becomes_confluence_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,6 +155,15 @@ class ConvertTests(unittest.TestCase):
             )
             self.assertIn("@startuml\nAlice -> Bob: ping\n@enduml", result["body"])
             self.assertEqual(result["attachments"], [])
+
+    def test_plantuml_cdata_terminator_is_escaped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("```plantuml\nAlice -> Bob: ]]>\n```\n", encoding="utf-8")
+
+            result: ConvertResult = collect_attachments(str(note), None)
+
+            self.assertIn("Alice -> Bob: ]]]]><![CDATA[>", result["body"])
 
     def test_image_width_is_preserved_in_confluence_markup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
