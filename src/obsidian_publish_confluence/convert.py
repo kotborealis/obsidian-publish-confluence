@@ -231,7 +231,7 @@ class CanvasMarkdownParser(HTMLParser):
         self.code_depth = 0
         self.pre_depth = 0
         self.href: str | None = None
-        self.list_stack: list[list[object]] = []
+        self.list_stack: list[tuple[str, int]] = []
 
     def line_break(self) -> None:
         if self.lines[-1]:
@@ -276,13 +276,13 @@ class CanvasMarkdownParser(HTMLParser):
             self.href = dict(attrs).get("href")
         elif tag in {"ul", "ol"}:
             self.line_break()
-            self.list_stack.append([tag, 0])
+            self.list_stack.append((tag, 0))
         elif tag == "li":
             self.line_break()
             if self.list_stack:
                 list_kind, item_number = self.list_stack[-1]
-                item_number = int(item_number) + 1
-                self.list_stack[-1][1] = item_number
+                item_number += 1
+                self.list_stack[-1] = (list_kind, item_number)
                 prefix = "  " * (len(self.list_stack) - 1)
                 prefix += f"{item_number}. " if list_kind == "ol" else "• "
                 self.append_text(prefix, styled=False)
