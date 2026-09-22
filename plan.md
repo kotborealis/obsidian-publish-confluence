@@ -12,4 +12,4 @@
 7. [x] Укрепить CI и release workflow: matrix Python, проверка версии tag, wheel smoke test,
    чистые artifacts и явные permissions.
 8. [x] Обновить README и добавить CHANGELOG.
-9. [ ] Выполнить полный набор проверок, создать `v0.1.11`, push и GitHub Release.
+9. [x] Выполнить полный набор проверок, создать `v0.1.11`, push и GitHub Release.
