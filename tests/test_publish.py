@@ -6,6 +6,7 @@ from base64 import b64encode
 from pathlib import Path
 from unittest.mock import patch
 
+from obsidian_publish_confluence.convert import AttachmentJson
 from obsidian_publish_confluence.publish import (
     Config,
     ConfluenceApiError,
@@ -94,7 +95,7 @@ class PublishTests(unittest.TestCase):
             space="DOCS",
             parent_id="123",
         )
-        attachment = {
+        attachment: AttachmentJson = {
             "name": "image.png",
             "data_b64": b64encode(b"image").decode("ascii"),
         }
