@@ -15,8 +15,8 @@ Versioning is derived from Git tags for releases.
 - Store the Confluence page URL in note frontmatter.
 - Upload attachments on both page create and update.
 - Convert Obsidian image embeds like `![[image.png]]` and `![[image.png|400]]`.
-- Convert Obsidian Canvas embeds like `![[board.canvas]]` to SVG attachments while preserving node coordinates.
-- Convert Markdown checkbox lists into Confluence tasks, including nested lists.
+- Convert Obsidian Canvas embeds like `![[board.canvas]]` to SVG attachments while preserving node coordinates and multiline labels.
+- Convert Markdown checkbox lists into Confluence tasks, including nested unordered and ordered lists.
 - Convert fenced code blocks to Confluence code macros.
 - Convert PlantUML blocks to the native Confluence `plantuml` macro.
 - Support `--dry-run` to inspect conversion and publish actions without changing Confluence.
@@ -83,12 +83,12 @@ This requires a Confluence instance with a compatible `plantuml` macro installed
 ## Release versioning
 
 The package version comes from the Git tag used for the release.
-For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release.
+For PyPI releases, create a tag like `v0.1.0` before publishing a GitHub Release. The release workflow verifies that the tag and built package version match.
 
 ## Limitations
 
-- Image and Canvas Obsidian embeds are converted to Confluence attachments.
-- Canvas embeds are rendered as SVG with text, file, link, group, and edge data; embedded files are shown as labels.
+- Image and Canvas Obsidian embeds are converted to Confluence attachments; local images are resolved relative to the note and recursively in the vault.
+- Canvas embeds are rendered as SVG with text, file, link, group, and edge data; embedded files and multiline labels are shown as labels.
 - Checkbox task status is stored in Confluence task macros; nested tasks become nested task lists.
 - Attachment names are namespaced automatically to avoid collisions between files with the same basename.
 - Numeric Obsidian image suffixes like `![[image.png|640]]` become Confluence image widths.
