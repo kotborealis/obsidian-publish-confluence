@@ -399,6 +399,19 @@ def canvas_svg_line_content(line: list[CanvasTextPart]) -> str:
     return "".join(content)
 
 
+def canvas_svg_multiline_content(text: str, x: float, line_height: float) -> str:
+    lines = text.splitlines() or [""]
+    if len(lines) == 1:
+        return canvas_svg_inline_content(lines[0])
+    x_value = format(x, ".15g")
+    return "".join(
+        f'<tspan x="{x_value}" dy="{format(0 if index == 0 else line_height, ".15g")}">'
+        f"{canvas_svg_inline_content(line)}"
+        "</tspan>"
+        for index, line in enumerate(lines)
+    )
+
+
 def canvas_node_geometry(
     node: dict[str, object], offset_x: float, offset_y: float
 ) -> tuple[float, ...]:
@@ -508,14 +521,36 @@ def render_canvas_svg(data: object) -> bytes:
         from_node = node_by_id.get(str(edge.get("fromNode")))
         to_node = node_by_id.get(str(edge.get("toNode")))
         if from_node is not None and to_node is not None:
-            edge_points.extend(
-                canvas_edge_geometry(from_node, edge.get("fromSide"), to_node, edge.get("toSide"))
+            geometry = canvas_edge_geometry(
+                from_node, edge.get("fromSide"), to_node, edge.get("toSide")
             )
+            edge_points.extend(geometry)
+            label = edge.get("label")
+            if isinstance(label, str) and label:
+                start, end = geometry[0], geometry[3]
+                base_label_y = (start[1] + end[1]) / 2 - 5
+                line_offset = (len(label.splitlines()) - 1) * 9
+                edge_points.extend(
+                    [
+                        ((start[0] + end[0]) / 2, base_label_y - line_offset),
+                        ((start[0] + end[0]) / 2, base_label_y + line_offset),
+                    ]
+                )
     if edge_points:
         min_x = min(min_x, *(point[0] for point in edge_points))
         min_y = min(min_y, *(point[1] for point in edge_points))
         max_x = max(max_x, *(point[0] for point in edge_points))
         max_y = max(max_y, *(point[1] for point in edge_points))
+
+    for node in nodes:
+        if node.get("type") != "group":
+            continue
+        label = canvas_node_label(node)
+        if not label:
+            continue
+        _, y, _, _ = canvas_node_geometry(node, 0, 0)
+        label_lines = len(label.splitlines())
+        min_y = min(min_y, y - 10 - (label_lines - 1) * 20)
 
     margin = 40
     svg_width = max(1, max_x - min_x + margin * 2)
@@ -549,10 +584,12 @@ def render_canvas_svg(data: object) -> bytes:
         )
         label = canvas_node_label(node)
         if label:
+            label_lines = len(label.splitlines())
+            label_y = y - 10 - (label_lines - 1) * 20
             parts.append(
-                f'<text x="{format(x + 16, ".15g")}" y="{format(y - 10, ".15g")}" '
+                f'<text x="{format(x + 16, ".15g")}" y="{format(label_y, ".15g")}" '
                 'font-family="Arial, sans-serif" font-size="18" font-weight="bold" '
-                f'fill="{color}">{canvas_svg_inline_content(label)}</text>'
+                f'fill="{color}">{canvas_svg_multiline_content(label, x + 16, 20)}</text>'
             )
 
     for edge in edges:
@@ -574,11 +611,13 @@ def render_canvas_svg(data: object) -> bytes:
         if isinstance(label, str) and label:
             label_x = (start_x + end_x) / 2
             label_y = (start_y + end_y) / 2 - 5
+            label_lines = len(label.splitlines())
+            label_y -= (label_lines - 1) * 9
             parts.append(
                 f'<text x="{format(label_x, ".15g")}" y="{format(label_y, ".15g")}" '
                 'text-anchor="middle" font-family="Arial, sans-serif" font-size="14" '
                 'fill="#334155" paint-order="stroke" stroke="#ffffff" stroke-width="5">'
-                f"{canvas_svg_inline_content(label)}</text>"
+                f"{canvas_svg_multiline_content(label, label_x, 18)}</text>"
             )
 
     for node in nodes:

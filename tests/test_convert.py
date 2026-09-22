@@ -323,6 +323,57 @@ class ConvertTests(unittest.TestCase):
         self.assertIn('<text x="16" y="-10"', svg)
         self.assertIn('<rect x="0" y="0" width="100" height="50"', svg)
 
+    def test_canvas_group_label_renders_multiple_lines(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {
+                        "id": "group",
+                        "type": "group",
+                        "label": "First line\nSecond line",
+                        "x": 0,
+                        "y": 0,
+                        "width": 200,
+                        "height": 100,
+                    }
+                ],
+                "edges": [],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('<tspan x="16" dy="0">First line</tspan>', svg)
+        self.assertIn('<tspan x="16" dy="20">Second line</tspan>', svg)
+        self.assertIn('viewBox="-40 -70 280 210"', svg)
+
+    def test_canvas_edge_label_renders_multiple_lines(self) -> None:
+        svg = render_canvas_svg(
+            {
+                "nodes": [
+                    {"id": "a", "type": "text", "x": 0, "y": 0, "width": 50, "height": 50},
+                    {
+                        "id": "b",
+                        "type": "text",
+                        "x": 0,
+                        "y": 200,
+                        "width": 50,
+                        "height": 50,
+                    },
+                ],
+                "edges": [
+                    {
+                        "fromNode": "a",
+                        "fromSide": "bottom",
+                        "toNode": "b",
+                        "toSide": "top",
+                        "label": "First\nSecond",
+                    }
+                ],
+            }
+        ).decode("utf-8")
+
+        self.assertIn('dy="0">First</tspan>', svg)
+        self.assertIn('dy="18">Second</tspan>', svg)
+
     def test_canvas_viewbox_includes_curved_edge_control_points(self) -> None:
         svg = render_canvas_svg(
             {
